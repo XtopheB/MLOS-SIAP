@@ -1,6 +1,6 @@
 # Machine Learning For Official Statistics and SDGs
 
-This repository contains the materails used for the course *Machine Learning For Official Statistics and SDGs* delivered online from the SIAP from 8 November to 24 December 2021. This repository follows the course's structure in different modules
+This repository contains the code (.Rmd) and data used for the course *Machine Learning For Official Statistics and SDGs* delivered online by the SIAP from 8 November to 24 December 2021. This repository follows the course's structure in different modules
 Interactive tools built in Shiny are also embedded in specific directories and helped learners have a better intuition of the methods. 
 
 > The code is created by Christophe Bontemps and Patrick Jonsson with help and inspiration from Pascal Lavergne.
