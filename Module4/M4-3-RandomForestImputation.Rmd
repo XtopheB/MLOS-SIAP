@@ -1,0 +1,256 @@
+---
+title: "Machine Learning Course"
+subtitle: "Imputation exercise"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson - SIAP
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, results =TRUE, echo = TRUE) 
+
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+
+```
+
+
+```{r packages, include=FALSE}
+
+# Data management packages
+library(dplyr)
+library(forcats)
+library(here)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(purrr)
+library(naniar)
+
+
+# Model fitting packages
+library(caret)
+library(regclass)
+library(randomForest)
+
+# Imputation package
+#https://cran.r-project.org/web/packages/mice/mice.pdf
+library(mice)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+library(kableExtra)
+library(xtable)
+
+```
+
+
+```{r, include = FALSE}
+
+# Reading DHS survey data from SIAP's website
+ChildMarriagedf <- read.csv(here("../data/ChildMarriage.csv"))
+
+# Explanation of datasets variables can be found here: https://dhsprogram.com/pubs/pdf/DHSG4/Recode7_DHS_10Sep2018_DHSG4.pdf
+
+# Filters the data set down to a few variables
+ChildMarriage <- ChildMarriagedf %>% dplyr::select(Before15 = Before15, Residence = HV025, Aridity = Aridity2015, Wealth = aWealthIndex2011, Density = Density2015, Education = Education, Age = Age, WealthLevel = HV270)
+
+
+# Makes the categorical variables into factors
+factor_columns <- c('Before15', 'Residence', 'Education', 'WealthLevel')
+ChildMarriage[factor_columns] <- lapply(ChildMarriage[factor_columns], factor)
+levels(ChildMarriage$Before15) <- c("Unmarried", "Married")
+
+
+# We remove a few observations which has missing some missing values
+ChildMarriage  <- ChildMarriage %>% na.omit() 
+
+# Crates a summary of the dataset when knitting the markdown file
+xtable(summary(ChildMarriage)) %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+# Introduction
+
+In this markdown file we will use the *mice* package to see if random forest works well to impute missing data.^[You'll need to load the *mice* package to work with this file. ] We will randomly create missing values in some of the variables in the data set, then try to impute this data, and compare if the imputed data matches the original data 
+
+# Data preprocessing 
+
+After loading the data we samples indices from this data 4 times into different vectors, where each sampling consists of 5% of the total amount of data. Each sample will correspond to a variable in the data set, where the variable will be set to NA for all the observations found in the sample vector. These are the values that we will attempt to impute. An overlapping of the indices can occur, leading to some observations in the data being harder to impute than others as one observation may consist of several missing values.
+
+Before setting values to NA we make a copy of the original data which we call *ground_truth*, with this we can see how well the random forest model imputes data. 
+
+```{r}
+set.seed(987)
+Residence_NA <- createDataPartition(ChildMarriage$Residence, p = .05, 
+                                  list = FALSE, 
+                                  times = 1)
+
+set.seed(789)
+Education_NA <- createDataPartition(ChildMarriage$Education, p = .05, 
+                                  list = FALSE, 
+                                  times = 1)
+
+set.seed(244)
+Wealth_NA <- createDataPartition(ChildMarriage$Wealth, p = .05, 
+                                  list = FALSE, 
+                                  times = 1)
+
+set.seed(405)
+Aridity_NA <- createDataPartition(ChildMarriage$Aridity, p = .05, 
+                                  list = FALSE, 
+                                  times = 1)
+
+
+ground_truth  <- ChildMarriage
+ChildMarriage$Residence[Residence_NA] <- NA
+ChildMarriage$Education[Education_NA] <- NA
+
+ChildMarriage$Wealth[Wealth_NA] <- NA
+ChildMarriage$Aridity[Aridity_NA] <- NA
+```
+
+
+
+```{r}
+gg_miss_var(ChildMarriage, show_pct = TRUE)
+```
+
+
+
+# Random Forest
+
+We can then use the *mice()* function in the *mice* package  (*Multivariate Imputation by Chained Equation*) with the method *rf* (for *Random Forest*) to fit a random forest with 15 trees.^[See the package page on CRAN https://cran.r-project.org/web/packages/mice/index.htm. Python users may use the  *sklearn* module *impute* see at the bottom of this page.] The function will by default create 5 imputations which can then be passed to the *complete()* function to retrieve one of the imputed data sets. The imputation algorithm takes a few minutes to run, you can increase or decrease the amount of trees used for each iteration, doing this will affect the time it takes to run the algorithm.
+
+
+```{r, cache = TRUE}
+impute <- mice(ChildMarriage, method = "rf", ntree = 15, seed = 12345)
+```
+
+Using the densityplot() function in mice we can compare the observed data that is given by the blue line compared to each of the 5 iterations of imputations that is visualized with the thinner red lines. 
+
+```{r}
+densityplot(impute)
+```
+
+We can also use bwplot() to visualize it using boxplots:
+
+```{r}
+bwplot(impute)[1:2]
+```
+
+From the box plots we can see that it slightly underestimates the density of the part of the distribution associated with larger values for Aridity, especially for the last iteration of the imputation. The imputation of the Wealth Index variable is closer to the real distribution, where an averaging over the 5 iterations would lead to a good approximation of the real observation. 
+
+
+```{r}
+# complete() by default returns the first imputed data set, using the action parameter in complete() allows you to 
+# change which data set you want to work with.
+imputed_data <- complete(impute, action = 4L)
+```
+
+
+Once the dataset is complete with the imputed data we can compare it with the original data. We can specifically compare only the ground truth data observations with the observations where the variable had a missing value to see if it imputed the variable correctly or not. 
+
+
+```{r}
+table(imputed_data$Residence[Residence_NA]==ground_truth$Residence[Residence_NA])
+```
+
+The random forest performed very well for the Residence variable, where the values are either Urban or Rural, where it imputed the correct value in roughly 80% of the time.
+
+
+```{r}
+table(imputed_data$Education[Education_NA]==ground_truth$Education[Education_NA])
+```
+
+For the education variable with five different factor levels the performance was not equally as good, where the overall accuracy of the 5 levels was around 30%.
+
+
+
+We can also visualize only the data observations that was imputed vs the actual observed value for those specific observations. Plotting this in a histogram for the continuous variables allows us to compare the density to see if it is a successful imputation. The purple distribution corresponds to the imputed data, the green corresponds to the actually observed values, and the blue is the overlapping part of these two distributions.   
+
+```{r}
+gt_aridity <- ground_truth[Aridity_NA,]
+im_aridity <- imputed_data[Aridity_NA,]
+
+ggplot(data = gt_aridity, aes(x=Aridity))+
+  geom_density(fill="green",  alpha = 0.5) +
+
+  geom_density(data=im_aridity, fill="purple", alpha = 0.5) +
+  theme(legend.position="bottom") +
+  theme_minimal() +
+  labs(title = "Aridity Distribution of Imputed (Purple) and Observed Data (Green)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y="Density") +
+  labs(x="Aridity")
+
+```
+
+From the figure it appears that the imputation is quite successful, overall the imputed data densities follows the observed data. There are however certain regions where the imputed data is under and overestimating the Aridity.
+
+The same procedure is done for the Wealth variable:
+
+```{r}
+gt_Wealth <- ground_truth[Wealth_NA,]
+im_Wealth <- imputed_data[Wealth_NA,]
+
+ggplot(data = gt_Wealth, aes(x=Aridity))+
+  geom_density(fill="green",  alpha = 0.5) +
+  geom_density(data=im_Wealth, fill="purple", alpha = 0.5) +
+  theme(legend.position="bottom") +
+  theme_minimal() +
+  labs(title = "Wealth Distribution of Imputed (Purple) and Observed Data (Green)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y="Density") +
+  labs(x="Wealth")
+
+```
+
+This imputation was very successful, there is quite little discrepancy between the two distributions.
+
+# Corresponding functions if you use Python
+
+- The sklearn module *impute* was inspired by the MICE package in R and can perform both univariate feature imputation with sklearn.impute.SimpleImputer() as well as multivariate feature imputation with sklearn.impute.IterativeImputer() together with sklearn.experimental.enable_iterative_imputer(). The multivariate feature imputation is still under development, but the impute module offers other functions such as KNNImputer() to impute values based on K-nearest neighbors.
+
+- Another python package is autoimpute with the imputations module that offers functions such as SingleImputer(), MultipleImputer(), MiceImputer(), which also adds reference to the MICE package in R. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

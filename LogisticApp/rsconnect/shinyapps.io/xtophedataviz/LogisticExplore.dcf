@@ -1,0 +1,13 @@
+name: LogisticExplore
+title: LogisticExplore
+username:
+account: xtophedataviz
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 5044958
+bundleId: 5213558
+url: https://xtophedataviz.shinyapps.io/LogisticExplore/
+when: 1636043163.4607
+lastSyncTime: 1636043163.4607
+asMultiple: FALSE
+asStatic: FALSE

@@ -1,0 +1,371 @@
+---
+title: "Machine Learning Course"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson - SIAP
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, results =TRUE, echo = TRUE) 
+
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+
+```
+
+
+
+`r if(knitr:::pandoc_to() == "latex") {paste("\\large")}` 
+
+```{r packages, include=FALSE}
+# Data management packages
+library(dplyr)
+library(here)
+library(forcats)
+library(modelsummary)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(purrr)
+library(rattle)
+library(ggcorrplot)
+
+# Model fitting packages
+library(rpart)
+library(caret)
+library(leaps)  
+library(ModelMetrics)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+library(xtable)
+library(kableExtra)
+
+
+
+```
+
+```{r}
+# Sets up parallel computing for more efficient training
+library(parallel)
+nrcore <- detectCores()
+cl <- parallel::makeCluster(nrcore-2, setup_strategy = "sequential")
+
+library(doParallel)
+registerDoParallel(cl)
+```
+
+
+```{r}
+df <- read.csv(here("../data/clean_data.csv"))
+
+```
+
+
+
+
+#
+
+```{r Setseeds, echo=FALSE}
+# function to set up random seeds
+setSeeds <- function(method = "cv", 
+                     numbers = 1, repeats = 1, 
+                     tunes = NULL, seed = 123) 
+  {
+#B is the number of resamples and integer vector 
+# of M (numbers + tune length if any)
+  B <- if (method == "cv") numbers
+  else if(method == "repeatedcv") numbers * repeats
+  else NULL
+  
+  if(is.null(length)) {
+    seeds <- NULL
+  } else {
+    set.seed(seed = seed)
+    seeds <- vector(mode = "list", length = B)
+    seeds <- 
+      lapply(seeds, function(x) 
+        sample.int(n = 1000000, 
+                   size = numbers + ifelse(is.null(tunes), 
+                                           0, tunes)))
+    seeds[[length(seeds) + 1]] <- 
+      sample.int(n = 1000000, size = 1)
+  }
+  # return seeds
+  seeds
+}
+```
+
+
+# Project Introduction
+
+In this project you will be tasked to try and fit a random forest to a regression task. In the data set you will have 13 explanatory variables along with a price variable which will be used as your target variable. We propose a workflow where you will fill in some blanks and interpret the results of the code you run. Fitting the **random forest** model with a large amount of observations and variables can be very computationally expensive. Therefore the first part of the project you will explore the data and fit an **LASSO**, using these results you can select some variables you think will be good to include in the random forest model, so that you do not have to run the model with the entire dataset as this will take a long time to run. We will provide you with some hyperparameters that you can use to prevent the training taking too long, as the main goal of the project is to become comfortable in running the code and interpreting the results. If you feel like taking the exercise a bit further, you are of course encouraged try to play around with some of the default parameters we set to see if you can improve the results! 
+
+## Data exploration
+
+```{r}
+datasummary_skim(df, type = "categorical" )
+```
+
+```{r}
+datasummary_skim(df, type = "numeric")
+```
+
+
+```{r}
+numeric <- select_if(df, is.numeric)
+# We compute the correlation matrix of the covariates
+corr_coef<-cor(numeric ,use = "p")
+#And then plot it with nice options 
+ggcorrplot(corr_coef, 
+           type = "lower",         # lower triangle of the matrix only
+           hc.order = TRUE,        # variable sorted from highest to lowest
+           outline.col = "white",  #Color options
+           lab = TRUE) + ggtitle("Correlation between numerical variables")
+```
+
+
+```{r}
+summary(df)
+```
+
+> To do: Interpret the results of the data exploration, is there anything that stands out in some of the plots? did you learn anything about the data that gives you an insight into if some variables will be more useful or less practical to include in the model?
+
+We see no strong correlations with the target variable *price*, based on the correlation plot it seems like *cleaning fee*, *bedrooms*, and *accommodates* has the strongest correlation, but it is only in the range of 0.11-0.14. The variables *accommodates*, *beds*, and *bedrooms* are strongly correlated which is not too surprising.  
+
+
+## Preprocessing
+
+Since the data set is quite large we only use half the observations (*p = 0.5 in createDataPartition() controls this*) for training the models, this will reduce the time you need to train. This can of course be increased or lowered if you want to experiment on the effect this has on your models. 
+
+```{r, include = FALSE}
+# Splits data into training and testing sets
+set.seed(777)
+trainIndex <- createDataPartition(df$price, p = 0.5, list = FALSE, times = 1)
+train_data <- df[trainIndex,]
+validation_data  <- df[-trainIndex,]
+
+```
+
+While the random forest does not require scaling, the LASSO will be affected by the scale of the variables, so we scale the data set before we start. 
+
+```{r, include = FALSE}
+# Scale the training and test data based on the training data mean and variance.
+ScalingValues <- preProcess(train_data, method = c("center", "scale"))
+train_data <- predict(ScalingValues, train_data)
+validation_data <- predict(ScalingValues, validation_data)
+```
+
+
+Now we can fit the a regression model with **LASSO** regularization and interpret the results, this may give us some information about which variables might be useful in the Random Forest model later. We fit the regression model using a using cross-validation to ensure it is giving robust results. The lambda parameter in the **LASSO** is tuned between 0 and 0.003, in increments of 0.0001.
+
+
+
+```{r Lasso}
+# Control variables
+numbers <- 5
+repeats <- 20
+rcvTunes <- 10 # tune number of models
+seed <- 123
+# repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                     numbers = numbers, repeats = repeats, 
+                     tunes = rcvTunes, seed = seed)
+
+
+# Controls for the CV 
+rcvControl <- trainControl(method = "repeatedcv", 
+                        number = numbers, repeats = repeats,
+                        seeds = rcvSeeds)
+
+
+set.seed(123)
+lasso_fit <- train(price ~ .,
+                   data = train_data, 
+                   method = "glmnet",
+                   tuneGrid = expand.grid(alpha = 1, 
+                                          # the search for an optimal lambda can be changed to reduce training time, by creating a smaller
+                                          # grid to search
+                                          lambda = seq(0, 0.003, 0.0001)),
+                   trControl = rcvControl)
+
+```
+
+
+
+```{r LassoPlot}
+ggplot(lasso_fit)   +
+  ggtitle("Lasso Penalization") +
+  labs(x = "Regularization parameter (Lambda)")+
+  theme_minimal()
+
+cbind(lasso_fit$bestTune$lambda,
+        -log(lasso_fit$bestTune$lambda)/log(10))  %>% 
+  kable(digits=3, col.names = c("lambda (exp)", "lambda (true)")) %>%
+  kable_styling()
+```
+ 
+We find the best results using `r lambda = lasso_fit$bestTune$lambda`. We also visualize the feature importance of the LASSO regression:
+
+
+```{r}
+
+theme_models <-  theme_minimal()+ theme(plot.title = element_text(hjust = 0.5),
+                legend.position = "none") 
+
+lasso_varImp <- data.frame(variables = row.names(varImp(lasso_fit)$importance), varImp(lasso_fit)$importance)
+# Below we set that we only show feature importances with a value larger than 3
+# You can lower this if you want to see more variables, or increase it if you want to see fewer.
+threshold = 2
+lasso_varImp <- lasso_varImp[lasso_varImp$Overall > threshold,]
+ggplot(data = lasso_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Lasso Regression") 
+```
+
+
+
+> To do: Interpret the results of the data exploration, is there anything that stands out in some of the plots? did you learn anything about the data that gives you an insight into if some variables will be more useful or less practical to include in the model?
+
+We find that some of the categorical variables appear to be informative, mainly *property type* and *neighborhood*, it also appears like the variables with the strongest correlations with our target variable still are somewhat useful in the model. 
+
+
+
+We can also look at the models out of sample Root Mean Squared Error (RMSE), and compare this later to the results of the RF:
+
+```{r}
+lasso_preds <- predict(lasso_fit, validation_data)
+rmse(actual = validation_data$price, predicted = lasso_preds)
+```
+
+
+
+> To do: Select your variables for the model! 
+
+We are now ready to give it a try and fit the **random forest**, but for this we need to specify some variables. So far we have only run with the formula *y ~ .*, this means that we give the algorithm access to all variables in the data set to fit the model. Based on the results so far in the project though it would be good to select a formula which you think could give good results. If you want to run with a specific formula for the model you can provide it in the following way: *price ~ bedrooms + cleaning_fee + more variables*..., etc. Remember that finding a good model can be an iterative process, don't be discouraged if you don't immediately find one that performs as well as you hoped.
+
+We have set the number of trees to 100, to try and keep the training relatively fast (it may still take some time though!), feel free to change it if you want to run more experiments, you may also set a fixed value for the *.mtry* hyperparameter to not make the training take too long. Based on the variable importance in the **LASSO** regression and which variables had the highest correlations with **price**, we will use the model: price ~ property_type + neighborhood + accommodates + bedrooms + cancellation_policy + cleaning_fee, as this contains what seems to be some important variables, and it will not be too complex to fit. 
+
+
+```{r,rf_mod,  cache =TRUE}
+# Training this model may take some time.
+
+# Change the formula below: 
+rf_fit <- train(price ~ property_type + neighborhood + accommodates + bedrooms + cancellation_policy + cleaning_fee,
+                data = train_data,
+                method = "rf",
+                ntree = 100)
+rf_fit
+```
+
+
+
+```{r}
+rf_preds <- predict(rf_fit, validation_data)
+rmse(actual = validation_data$price, predicted = rf_preds)
+```
+
+With this model we find some slight improvement over the LASSO in terms of the RMSE. 
+
+It is now interesting to see if the feature importance of the two different approaches are similar or not:
+
+
+```{r}
+
+theme_models <-  theme_minimal()+ theme(plot.title = element_text(hjust = 0.5),
+                legend.position = "none") 
+
+rf_varImp <- data.frame(variables = row.names(varImp(rf_fit)$importance), varImp(rf_fit)$importance)
+
+ggplot(data = rf_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Random Forest") 
+```
+
+Comparing the result of the variable importance plot from the **LASSO** with the one from random forest we see some differences. While *property type* and *neighborhood* is still important, it is now less important than how many the unit accommodates, as well as the cleaning fee. We can also see that it is mainly just Manhattan which is the important feature in the *neighborhood variable*, where previously it was Staten Island. 
+
+In terms of performance the RMSE of the **random forest** was slightly lower than the regression model using **LASSO**, despite the random forest model only using a small subset of the variables available. 
+
+
+> To do: comment on your models performance, and its feature importance. Was the feature importance what you expected? Did the results of your model match what the results that you saw from the LASSO?
+
+```{r}
+knitr::knit_exit()
+```
+
+
+> Optional? Let R find the optimal set of variables by including all of them during the model fitting and compare this to your results. This would take some time to run. 
+
+A more common approach in machine learning where the algorithm has a natural way of selecting variables is to let the algorithm sort out the variable selection itself. In large data sets this can be very difficult to train as the computational complexity grows with your data and choice of hyperparameters. For this we recommend setting the *.mtry* hyperparameter to a fixed value as tuning this parameter for the entire dataset will take a long time.
+
+```{r, cache =TRUE}
+# Training this model may take some time.
+
+# Change the formula below: 
+rf_fit_opt <- train(price ~ .,
+                data = train_data,
+                method = "rf",
+                ntree = 100,
+                tuneGrid = expand.grid(.mtry = 6))
+```
+
+```{r}
+rf_fit_opt
+```
+
+```{r}
+rf_opt_preds <- predict(rf_fit_opt, validation_data)
+rmse(actual = validation_data$price, predicted = rf_opt_preds)
+```
+
+```{r}
+
+theme_models <-  theme_minimal()+ theme(plot.title = element_text(hjust = 0.5),
+                legend.position = "none") 
+
+rf_opt_varImp <- data.frame(variables = row.names(varImp(rf_fit_opt)$importance), varImp(rf_fit_opt)$importance)
+
+ggplot(data = rf_opt_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Random Forest") 
+```
+
+
+

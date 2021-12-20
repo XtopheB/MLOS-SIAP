@@ -1,0 +1,585 @@
+---
+title: "Machine Learning in Practice"
+subtitle: "Random Forest"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson - SIAP^[*This document uses teaching materials developped by Pascal Lavergne* (*Toulouse School of Economics*)]
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, results =TRUE, echo = TRUE) 
+
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+SIAP.red <- "#eb4034"
+
+```
+
+
+
+`r if(knitr:::pandoc_to() == "latex") {paste("\\large")}` 
+
+```{r packages, include=FALSE}
+# Data management packages
+library(dplyr)
+library(forcats)
+library(here)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(purrr)
+library(rattle)
+
+# Model fitting packages
+library(rpart)
+library(caret)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+library(xtable)
+library(kableExtra)
+library(modelsummary)
+
+# Sampling
+library(smotefamily)
+library(recipes)
+library(themis)
+
+```
+
+```{r}
+# Sets up parallel computing for more efficient training
+library(parallel)
+nrcore <- detectCores()
+cl <- parallel::makeCluster(nrcore-1, setup_strategy = "sequential")
+
+library(doParallel)
+registerDoParallel(cl)
+```
+
+
+# Introduction
+
+In this exercise we will build on the theory presented in the Decision Tree file and fit a Random Forest and a Gradient boosted tree model on the same DHS survey data that we used in module 2. After fitting the models to the data we will evaluate the metrics and see if there is anything to gain in this example by using non linear classifiers.
+
+As we recall we struggled with achieving good accuracy measures that accounted for the class imbalance. This could be due to some non linear property of the data, or that we are missing some variables to explain the data. 
+
+
+# Data preprocessing and visualization
+
+
+```{r}
+# Reading DHS survey data
+# Explanation of datasets variables can be found here: https://dhsprogram.com/pubs/pdf/DHSG4/Recode7_DHS_10Sep2018_DHSG4.pdf
+
+ChildMarriagedf <- read.csv(here("../data/ChildMarriage.csv"))
+
+# Filters the data set down to a few variables
+ChildMarriage <- ChildMarriagedf %>% 
+  dplyr::select(Before15 = Before15, Residence = HV025, Aridity = Aridity2015,
+                WealthIndex = aWealthIndex2011, Density = Density2015,
+                Education = Education, Age = Age)
+
+
+# Makes the categorical variables into factors
+factor_columns <- c('Before15', 'Residence', 'Education')
+ChildMarriage[factor_columns] <- lapply(ChildMarriage[factor_columns], factor)
+levels(ChildMarriage$Before15) <- c("Unmarried", "Married")
+
+# We remove a few observations which has missing some missing values
+ChildMarriage  <- ChildMarriage %>% na.omit() 
+
+```
+
+## Summary statistics
+
+```{r}
+datasummary_skim(ChildMarriage, type = "categorical" )
+datasummary_skim(ChildMarriage, type = "numeric")
+```
+
+
+Before we start we can visualize the distribution of our target variable *Before15*:
+
+
+```{r fig.height=2, fig.width= 8}
+ggplot(ChildMarriage) + geom_bar(aes(y = Before15), colour="white", fill = SIAP.color) +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5))+ 
+  labs(x = "", y = "") +
+  ggtitle("Marriage before 15 ")
+```
+
+As we recall from before there is some class imbalance in the target variable *Before15* that we need to keep in mind.  
+
+## Train and Validation data sets
+
+```{r }
+# Splits data into training and testing sets
+set.seed(777)
+trainIndex <- createDataPartition(ChildMarriage$Before15, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+train_data <- ChildMarriage[ trainIndex,]
+validation_data  <- ChildMarriage[-trainIndex,]
+
+```
+
+# Random Forest
+
+Random Forest is *bagging* (*bootstrap aggregation*) method. During training a bootstrap sample is drawn from the training data together with a subset of the total amount of variables, we then pick the best available variable to split the tree into two daughter nodes repeatedly until we reach a stopping criterion. This process is repeated until we have trained as many individual decision trees as we want. We can then combine the output of the decision trees into one final output.
+
+In the case of regression we average the output over all the decision trees, whereas in classification our final output will be based on the **majority vote** of the individual decision trees. 
+
+## Fitting the Random Forest
+
+```{r, include = FALSE}
+# function to set up random seeds (you do not need to understand that)
+
+setSeeds <- function(method = "cv", numbers = 1, repeats = 1, tunes = NULL, seed = 1237) {
+  #B is the number of resamples and integer vector of M (numbers + tune length if any)
+  B <- if (method == "cv") numbers
+  else if(method == "repeatedcv") numbers * repeats
+  else NULL
+  
+  if(is.null(length)) {
+    seeds <- NULL
+  } else {
+    set.seed(seed = seed)
+    seeds <- vector(mode = "list", length = B)
+    seeds <- lapply(seeds, function(x) sample.int(n = 1000000, size = numbers + ifelse(is.null(tunes), 0, tunes)))
+    seeds[[length(seeds) + 1]] <- sample.int(n = 1000000, size = 1)
+  }
+  # return seeds
+  seeds
+}
+
+```
+
+
+
+```{r, include = FALSE}
+# Repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                      numbers = 5, repeats = 5, 
+                      tunes = 100, seed = 777)
+
+# Configure the trainControl argument for cross-validation
+K5_CV_seed <- trainControl(method = "cv", number = 5, classProbs = FALSE, 
+                           savePredictions = TRUE, seeds = rcvSeeds,
+                           allowParallel = TRUE)
+
+```
+
+We begin with fitting a Random Forest model using cross-validation on the *Training* data set 
+
+```{r, cache = TRUE}
+set.seed(777)
+
+# Training this model takes a few minutes
+rf_fit <- train(Before15 ~ .,
+                  data = train_data,
+                  method = "rf",
+                  trControl = K5_CV_seed)
+```
+
+```{r}
+rf_fit
+```
+
+## Evaluating Model Performance 
+
+We can also assess the decision trees both *in sample* and *out of sample* performance. 
+
+#### The *in sample* performance is:
+
+```{r}
+rf_pred <- predict(rf_fit, train_data)
+confusionMatrix(rf_pred, train_data$Before15, positive = "Married")
+```
+
+We need now further investigation to see if the model generalizes well or if it just has learned the training data. 
+
+
+#### The *Out of sample* performance:
+
+
+```{r}
+rf_pred <- predict(rf_fit, validation_data)
+confusionMatrix(rf_pred, validation_data$Before15, positive = "Married")
+```
+
+
+The out of sample performance is obviously lower, the sensitivity and kappa lower than before but the difference is not that important.  We may still try to improve by optimizing some of the parameters. 
+
+# Optimizing Random Forests
+
+Random forest use two mechanisms:
+
+* Bootstrap aggregating bagging
+  * $\hookrightarrow$ Construct $B$ trees, on $B$ bootstrapped samples
+* **Random** selection of variables used in a tree (*Feature sampling*)
+  * $\hookrightarrow$ At each node, randomly select only $m$ variables
+  
+The result is that (in broad terms) : 
+    $$
+Var_{Random \; forest} = \rho \cdot \sigma^{2} + \frac{\sigma^{2}}{B}
+$$
+where $\rho$ is the  (sort of)  *correlation* of the trees  and $\sigma^{2}$ is the *variance* of each decision tree (assuming they have the same) 
+
+The resulting predictor should have a lower variance but we may still need to optimize some important parameters:
+
+* the number of variables (*mtry*) used in each tree in order to decrease $\rho$
+$\hookrightarrow$  *decorrelate* the trees
+
+* the number of trees $B$ used in the Forest in order to decrease $\frac{\sigma^{2}}{B}$
+$\hookrightarrow$  *decrease* the variance
+
+
+
+## Optimizing the combinations of variables 
+
+> A trick is to begin to optimize the random forest on our training process first. 
+This may end up saving us a lot of training time. 
+
+We therefore begin by tuning the **number of possible variables** considered at each split in a decision tree by tuning the *mtry* hyperparameter. We do a grid search and compute the accuracy for each value of *mtry* $\in \{0,8\}$.
+
+```{r, cache = TRUE}
+# /!\ running this chunk can be long!
+tunegrid <- expand.grid(.mtry = (1:8)) 
+
+rf_gridsearch <- train(Before15 ~ ., 
+                       data = train_data,
+                       method = 'rf',
+                       metric = 'accuracy',
+                       tuneGrid = tunegrid,
+                       ntree = 100)
+
+```
+
+
+```{r}
+print(rf_gridsearch)
+```
+
+
+```{r mtryANDaccuracy}
+ggplot(data=rf_gridsearch$results, aes(Accuracy, x = mtry)) +
+  geom_line( colour = SIAP.color)+
+  geom_point(colour = "grey")+
+  ggtitle(label = "Optimizing the accuracy of the trained random forest model") +
+  labs(x = "Nb of variables considered at each split (mtry)" )+
+  theme_minimal()
+```
+
+```{r mtryANDkappa}
+ggplot(data=rf_gridsearch$results, aes(y = Kappa, x = mtry )) +
+  geom_line(color= SIAP.red)+
+  geom_point(colour = "grey")+
+  ggtitle(label = "Optimizing the Kappa of the trained random forest model") +
+  labs(x = "Nb of variables considered at each split (mtry)" )+
+  theme_minimal()
+```
+
+
+
+From the visualization we can see that we can see we gain nothing, neither in *accuracy* or in *Kappa* from trying more than *3* randomly selected predictor variables per split. This is useful information for future training if we want to save computation time, we should not test more variables than what is necessary as Random Forest can be slow to fit. 
+
+> Why are the curves decreasing after a threshold? Isn't it always better to have more predictors?
+
+Adding more regressors seems to deteriorate the performances of the random Forest model, hence this inverted U-shape curve. This seems counter intuitive unless one understands that if all the decisions are based an the same variable sin each tree, the final forest will be made of almost identical trees and so be quite *correlated* (remember that the variance of the random forest depends on $\rho \cdot \sigma^{2}$ )
+
+
+## Optimizing the number of trees in the Random Forest
+
+Another way of optimizing is to see if we can improve the results by testing for a varying number of trees using the *ntree* hyperparameter. We do a grid search and compute both the accuracy and Kappa for each value of *ntree*:  
+
+
+```{r, cache = TRUE}
+# /!\ running this chunk can be long!
+modellist <- list()
+# Uses the optimal mtry from the previous model
+grid <- expand.grid(.mtry=  3)
+
+#train with different ntree parameters, to find an optimal amount of trees
+for (ntree in c(5, 10, 25, 50, 100, 250, 500, 1000)){
+  set.seed(1234)
+  fit <- train(Before15~.,
+               data = train_data,
+               method = 'rf',
+               metric = 'Accuracy',
+               tuneGrid = grid,
+               trControl = K5_CV_seed,
+               ntree = ntree)
+  key <- toString(ntree)
+  modellist[[key]] <- fit
+}
+
+```
+
+```{r}
+#Compare results
+results <- resamples(modellist)
+summary(results)
+```
+
+ 
+
+```{r ntreeANDaccuracy}
+# probably need some work on the result output for kappa, but accuracy is OK
+library(tidyr)
+resultsA <- as.data.frame(results)%>%
+  mutate(Resample = as.factor(Resample))  %>%
+  gather(key= Resample, accuracy,   factor_key=TRUE)
+  
+ggplot(data= resultsA)+
+   aes(x = Resample, y = accuracy) +
+  geom_boxplot(fill = SIAP.color, alpha = 0.3)+
+  geom_point(col = "grey")+
+  ylim(0.68, 0.73)+
+  ggtitle(label = "Optimizing the accuracy of the trained random forest model") +
+  labs(x = "Number of trees (ntree)" )+
+  theme_minimal()
+  
+```
+
+
+```{r ntreeANDkappa}
+# probably need some work on the result output for kappa, but accuracy is OK
+library(tidyr)
+resultsK <- as.data.frame(results$values)%>%
+  mutate(Resample = as.factor(Resample)) %>%
+  select(ends_with('Kappa')| starts_with('Resample'))%>%
+  gather(key= Resample, Kappa,   factor_key=TRUE)
+  
+ggplot(data= resultsK)+
+   aes(x = Resample, y = Kappa) +
+  geom_boxplot(fill = SIAP.red , alpha = 0.3)+
+  geom_point(col = "grey")+
+  ggtitle(label = "Optimizing the accuracy of the trained random forest model") +
+  ylim(0.15, 0.28)+
+  labs(x = "Number of trees (ntree)" )+
+  theme_minimal()
+  
+
+```
+
+As we can see the amount of trees (*ntree*) has a little impact on the accuracy and the kappa, at least on the *median* values (over all CV samples). This means that we could choose one of the simpler Random Forest fit with 100 or 250 trees, as it seems to perform quite well. 
+
+It is important to note that a **higher** amount of trees  will **lower** the variance, as we can clearly see with the width of the boxes in the boxplot. The point of using an Random Forest over simple Decision Trees is that the Random Forest will lower the variance of the fitted model as you average over an ensemble of decision trees. It may be counter-intuitive, but due to properties of the Random Forest, overfitting will not arise simply due to adding more trees to the model. So unless you have specific computational reasons, using a large amount of trees will often  be preferred. If you want to learn more about this, it is both shown empirically and mathematically in *The Elements of Statistical Learning: Data Mining, Inference, and Prediction*.^[Hastie, Tibshirani and Friedman *The Elements of Statistical Learning: Data Mining, Inference, and Prediction*
+https://web.stanford.edu/~hastie/ElemStatLearn// ]
+
+
+We can therefore fit a new Random Forest with 1000 trees to see its out of sample performance:
+
+```{r, cache = TRUE}
+# /!\ running this chunk can be long!
+tunegrid <- expand.grid(.mtry = 3) 
+
+rf_ntree <- train(Before15 ~ ., 
+                       data = train_data,
+                       method = 'rf',
+                       metric = 'accuracy',
+                       tuneGrid = tunegrid,
+                       ntree = 1000)
+rf_ntree
+
+```
+
+####  Prediction results on the validation sample
+
+
+```{r}
+# Out of sample evaluation
+rf_ntree_pred <- predict(rf_ntree, validation_data)
+confusionMatrix(rf_ntree_pred, validation_data$Before15, positive = "Married")
+```
+
+Comparing the new Random Forest to the old one we see some improvement in both the **Kappa** and the **sensitivity**, unfortunately even though we optimize the amount of trees the accuracy with regards to the class imbalance is still poor and we have still have a low sensitivity.
+
+
+## Optimizing our framework with information on our data set
+
+Another way we can optimize our model fit is through our choice of the split between **train** and **validation** data sets. Since we have an imbalanced data set (we oberve few marriage before 15),  we can increase the proportion of *Married observation* in our training data, and use the **SMOTE** algorithm like we did in module 2 to oversample the minority class (married before 15)and try to increase the general performance of the model.
+
+```{r, include = FALSE}
+# Splits data into training and testing sets
+set.seed(777)
+trainIndex <- createDataPartition(ChildMarriage$Before15, p = .9, 
+                                  list = FALSE, 
+                                  times = 1)
+train_data <- ChildMarriage[ trainIndex,]
+validation_data  <- ChildMarriage[-trainIndex,]
+
+```
+
+
+```{r}
+numeric_columns <- c('Residence', 'Education')
+train_data[numeric_columns] <- lapply(train_data[numeric_columns], as.numeric)
+
+# step_smote() requires factors to be numeric, these must later be set as factors before fitting the new model.
+SMOTE_data <- recipe(Before15 ~ ., data = train_data) %>%
+  step_smote(Before15)%>%
+  prep() %>%
+  bake(new_data = NULL) 
+
+```
+
+```{r}
+# Round the columns before turning them back to factors or we get more factor levels due to decimals
+SMOTE_data$Residence <- round(SMOTE_data$Residence, digits = 0)
+SMOTE_data$Education <- round(SMOTE_data$Education , digits = 0)
+numeric_columns <- c('Residence','Education')
+SMOTE_data[numeric_columns] <- lapply(SMOTE_data[numeric_columns], factor)
+
+datasummary_skim(SMOTE_data, type = "categorical" )
+datasummary_skim(SMOTE_data, type = "numeric")
+```
+
+
+
+```{r, cache = TRUE}
+# Fit a new model using the balanced data generated by the SMOTE algorithm
+tunegrid <- expand.grid(.mtry = 3) 
+SMOTE_fit = train(
+  form = Before15 ~ .,
+  data = SMOTE_data,
+  trControl = trainControl(method = "cv", number = 5),
+  ntree = 1000,
+  method = "rf")
+
+SMOTE_fit
+```
+
+####  Prediction results on the validation sample
+
+```{r}
+# Transform the data into factors again before we predict
+numeric_columns <- c('Residence', 'Education')
+validation_data[numeric_columns] <- lapply(validation_data[numeric_columns], as.numeric)
+validation_data[numeric_columns] <- lapply(validation_data[numeric_columns], factor)
+
+smote_pred <- predict(SMOTE_fit, validation_data)
+confusionMatrix(smote_pred, validation_data$Before15, positive = "Married")
+```
+
+With this new configuration, the  Random Forest model is less efficient in terms of overall accuracy. But the **sensitivity** and **kappa** are greatly  increased with the optimization. Here again, all depends on the final use of the prediction: accuracy may be hiding the real object of interest (predicting marriage before 15) and one may prefer having a higher *specificity* or *kappa*.  
+
+We will continue to explore if Gradient boosted trees can perform better than the Random Forest.
+
+
+# Gradient Boosted Trees
+
+When we used a bagging method like Random Forest (low bias, high variance) the goal is to fit several decisions independently (*in parallel*) and to "average" the predictions of each tree, as the intuition is that combining several diverse learners is better than using just one. The variance will be reduced when we use bagging, which in principle will lead to a model that will generalize better to new data. 
+
+
+With *Gradient Boosting* the logic is slightly different. Instead of simultaneously constructing independent trees, we **sequentially** fit very simple trees (or *weak learners*) with high bias & low variance. The sequence is iterative, each tree trying to correct the errors from the previous one. Combining trees in this way optimizes the strengths and weaknesses of a single model. *Gradient boosted trees* can often work well, but they often require more tuning and training than their bagging counterpart (Random Forest). 
+
+
+### General representation of *Gradient Boosting*^[Image from *UC Business Analytics R Programming Guide* http://uc-r.github.io/gbm_regression ] 
+
+ ![](http://uc-r.github.io/public/images/analytics/gbm/boosted-trees-process.png)
+
+### Pseudocode
+
+1. Fit a first decision tree (*weak learner*)
+2. Take the errors (misclassified points)
+3. Fit a second decision tree on these errors
+4. Adjust the current tree and repeat 
+
+
+
+Some of hyperparameters should be tuned:
+
+* the *number of trees*
+* the *minimum observations* required in a leaf node
+* the *shrinkage* (or *learning rate*) which affects how fast the algorithm learns and how big the impact of subsequent fitted trees will have in the model, and 
+* the *interaction depth* which controls the depth of the tree.
+
+We will keep the *shrinkage* hyperparameter fixed at 0.1, as values between 0.001-0.1 generally works well. Lower values will lead to longer training time but also generally may find better a better local optima during optimization. the minimum amount of observations in a leaf node will be set to 50 as we work with a quite large data set. We will tune the interaction depth and test depths 3, 5, and 9. The amount of trees will also be tuned, where values between 50-1500 will be tested in steps of 50. 
+
+```{r}
+# /!\ running this chunk can be long!
+library(gbm)
+gbmGrid <-  expand.grid(interaction.depth = c(3, 5, 9), 
+                        n.trees = (1:30)*50, 
+                        shrinkage = 0.1,
+            n.minobsinnode = 50)
+                        
+set.seed(777)
+gbmFit <- train(Before15 ~ ., data = SMOTE_data, 
+                 method = "gbm", 
+                 trControl = trainControl(method = "cv", number = 5), 
+                 verbose = FALSE, 
+                 tuneGrid = gbmGrid)
+
+```
+
+```{r}
+gbmFit$finalModel
+
+```
+
+
+
+####  Prediction results on the validation sample
+```{r}
+gbm_pred <- predict(gbmFit, validation_data)
+confusionMatrix(gbm_pred, validation_data$Before15, positive = "Married")
+
+summary(gbm_pred)
+
+```
+
+
+We see some improvements using the synthetically generated data using **SMOTE** together with the Gradient boosted method, where now the Kappa is slightly higher than in Random Forest. 
+
+It is important to acknowledge that even more advanced algorithms can not overcome any potential shortcomings in the data, in particular with severe imbalance and a phenomena difficult to link with available variables.
+
+
+# Wrap up
+
+- Random Forest is a bagging technique that fits an ensemble of decision trees which can be used for both classification and regression tasks.
+- Averaging over the ensemble in bagging methods like Random Forest will lower the overall variance. 
+- Random Forest, as many other Machine learning methods needs a tuning of the hyperparameters, in particular:
+  * the number of trees and 
+  * the number of variables used at each decision node.
+- Gradient boosted tree is a boosting algorithm that sequentially builds "weak models" which has high bias and low variance.
+- Gradient boosting requires a lot of hyperparameter tuning, which can be computationally expensive to do for complex or high dimensional problems.
+
+***
+
+# Corresponding functions if you use Python
+
+- *pandas* and *numpy* offer great functions for handling your data.
+- *Sklearns* ensemble library has the function *ensemble.RandomForestClassifier()*, which can be used to train the Random Forest model. It also has gradient boosting functions like *ensemble.GradientBoostingClassifier()* and *ensemble.GradientBoostingRegressor()*. 
+- the library *imbalanced-learn* has tools for oversampling, such as the SMOTE algorithm.
+- *matplotlib* offers good visualizations for your results, including feature importance plots.
+
+

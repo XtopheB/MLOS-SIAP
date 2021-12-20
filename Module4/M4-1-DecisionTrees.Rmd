@@ -1,0 +1,496 @@
+---
+title: "Machine Learning in Practice: Decision Trees"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson - SIAP^[*This document uses teaching materials developped by Pascal Lavergne* (*Toulouse School of Economics*)]
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, results =TRUE, echo = TRUE) 
+
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+
+```
+
+
+
+`r if(knitr:::pandoc_to() == "latex") {paste("\\large")}` 
+
+```{r packages, include=FALSE}
+# Data management packages
+library(dplyr)
+library(here)
+library(forcats)
+library(modelsummary)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(purrr)
+library(rattle)
+
+# Model fitting packages
+library(rpart)
+library(caret)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+library(xtable)
+library(kableExtra)
+
+```
+
+
+
+# Introduction
+
+In this markdown we will cover some of the theory and intuition behind Decision Trees. We will go through how to fit them, evaluate them, optimize them and how to prune the fitted trees. Like before we will use parts of a [DHS survey](https://dhsprogram.com/data/available-datasets.cfm) data from Bangladesh coupled with some geospatial data, but this time we will try classify whether or not the residence of an individual is *rural* or *urban*. 
+
+
+### Data preprocessing 
+
+
+```{r}
+
+# Reading DHS survey data 
+ChildMarriagedf <- read.csv(here("../data/ChildMarriage.csv"))
+
+# Explanation of datasets variables can be found here: https://dhsprogram.com/pubs/pdf/DHSG4/Recode7_DHS_10Sep2018_DHSG4.pdf
+
+# Filters the data set down to a few variables
+ChildMarriage <- ChildMarriagedf %>% dplyr::select(Before15 = Before15, Residence = HV025, Aridity = Aridity2015, WealthIndex = aWealthIndex2011, Density = Density2015, Education = Education, Age = Age, WealthLevel = HV270)
+
+
+# Makes the categorical variables into factors
+factor_columns <- c('Before15', 'Residence', 'Education', 'WealthLevel')
+ChildMarriage[factor_columns] <- lapply(ChildMarriage[factor_columns], factor)
+levels(ChildMarriage$Before15) <- c("Unmarried", "Married")
+
+
+# We remove a few observations which has missing some missing values
+ChildMarriage  <- ChildMarriage %>% na.omit() 
+
+```
+
+```{r}
+datasummary_skim(ChildMarriage, type = "categorical" )
+datasummary_skim(ChildMarriage, type = "numeric")
+```
+
+
+Before we start we can look at the distribution of our target variable *Residence*:
+
+
+```{r}
+ggplot(ChildMarriage) + geom_bar(aes(y = Residence), colour="white", fill = SIAP.color) +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5))+ 
+  labs(x = "", y = "") +
+  ggtitle("Distribution of Residence")
+```
+
+There appears to be a slight imbalance, but nothing too bad that it requires any intervention.
+
+```{r, include = FALSE}
+# Splits data into training and testing sets
+set.seed(777)
+trainIndex <- createDataPartition(ChildMarriage$Residence, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+train_data <- ChildMarriage[ trainIndex,]
+validation_data  <- ChildMarriage[-trainIndex,]
+
+```
+
+
+> Should we standardize our data before training using decision trees?
+
+When using decision trees we do not need to standardize the data as they are scale invariant. The reason for this is quite intuitive as the nodes simply partitions your data into sets depending on which splits gives the best training performance. 
+
+
+```{r, include = FALSE}
+# function to set up random seeds
+setSeeds <- function(method = "cv", numbers = 1, repeats = 1, tunes = NULL, seed = 1237) {
+  #B is the number of resamples and integer vector of M (numbers + tune length if any)
+  B <- if (method == "cv") numbers
+  else if(method == "repeatedcv") numbers * repeats
+  else NULL
+  
+  if(is.null(length)) {
+    seeds <- NULL
+  } else {
+    set.seed(seed = seed)
+    seeds <- vector(mode = "list", length = B)
+    seeds <- lapply(seeds, function(x) sample.int(n = 1000000, size = numbers + ifelse(is.null(tunes), 0, tunes)))
+    seeds[[length(seeds) + 1]] <- sample.int(n = 1000000, size = 1)
+  }
+  # return seeds
+  seeds
+}
+
+```
+
+
+
+```{r, include = FALSE}
+
+# Repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                      numbers = 5, repeats = 5, 
+                      tunes = 100, seed = 1080)
+
+# Configure the trainControl argument for cross-validation
+K5_CV_seed <- trainControl(method = "cv", number = 5, classProbs = FALSE, 
+                           savePredictions = TRUE, seeds = rcvSeeds,
+                           allowParallel = TRUE)
+
+```
+
+# Fitting a decision tree
+
+When we fit a model using decision tree,  the variable selection is done automatically for us using a stepwise algorithm, but the criteria used to determine the splits are based on some measures.  
+
+> The goal is to increase the quality of the classification at the each stage, that is to decrease the level of *impurity*  at each node
+
+## How to split?
+
+We need to find a criterion that will provide a "goodness" of the accuracy of the splitting. First let us define $\widehat{p}_{m \kappa}$ the proportion of class $m$ (Urban or rural in our case) in node $\kappa$.  We classify  each observation  in node m to the majority class that is the one where $\widehat{p}_{m \kappa}$ is maximum. 
+
+
+**Gini Impurity** and **Entropy** are examples of metrics that measure the quality of a split in the decision tree. The algorithm will choose the variable and where to split this variable based on metrics like this, based on what improved the tree the most. 
+
+
+###  Gini impurity index
+
+In *rpart* the features which are selected to be split in the tree is based on the **Gini Impurity** measure by default.
+
+The Gini coefficient measures the *impurity* at each node $\kappa$
+
+$$
+D_{\kappa} = \sum_{m=1}^M  \widehat{p}_{m \kappa} (1-\widehat{p}_{m
+  \kappa})
+$$
+  
+
+The function $x*(1-x)$  being an **inverted U-shape**, one may notice that for a node $\kappa$, the *impurity* $\widehat{p}_{m \kappa} (1-\widehat{p}_{m \kappa})$ is maximum if $\widehat{p}_{m \kappa} =1/2$ that is when each split contains  50% of Urban  and 50% of Rural.  Our goal is to thus to find splits that **minimize** the Gini coefficient  and provide the least *impure*  splits.^[ If in the each node there is only one class  represented, then $D_{\kappa}$ is zero.]  
+
+
+
+### Entropy and Information gain
+
+Another common model fitting optimization is based on **Information Gain** which is based on information theory and uses **entropy**, a measure of disorder/uncertainty in the data. The formula to calculate **Entropy** is:
+
+$$
+  D_{\kappa}^ E =   - \sum_{m=1}^M  \widehat{p}_{m \kappa}  \log
+  \widehat{p}_{m \kappa}
+$$
+
+
+A dataset with a 50/50 proportion for the two classes would have a maximum entropy (equal to 1), whereas an imbalanced dataset with a split of 10/90 would have a smaller entropy.^[Since the logarithm of fractions gives a negative value  a "-" sign is used in entropy formula to negate these negative values.] 
+
+
+It is expected that the entropy  (or *impurity*) after each splitting is lower than the the entropy before, and thus that the we gained in information (or lose in uncertainty).  The  **Information Gain** measures the entropy before splitting the tree with the entropy after splitting the tree, to see how big the decrease in uncertainty is. The maximum information gain is then selected for determining the current split.  
+
+$$Information\;Gain = Entropy_{\; Before} - Entropy_{\; After}$$
+
+Both  metrics to split the decision trees are commonly used and produces good results. 
+
+**Technical note**: As **Entropy** uses *log()* its more computationally complex to calculate, which could be useful to keep in mind if you will be fitting a lot of decision trees^[like in Random Forest]. A potential source of problem when using **Information Gain** is that it favors attributes that can take on a large number of distinct values, leading to overfitting.
+
+## Visualizing a tree
+
+```{r Originaltree}
+cp.input <- 0
+maxdepth.input <- 30
+Original_tree_fit <- rpart(Residence~., 
+                           data= train_data, 
+                           control = rpart::rpart.control(cp = cp.input, 
+                                                 maxdepth = maxdepth.input))
+
+# Visualizing a tree
+fancyRpartPlot(Original_tree_fit,
+               caption =  paste("Decision tree with no constrains" ),
+               )
+
+# # Another tool for visualizing a tree
+# library(rpart.plot)
+# 
+# rpart.plot(Original_tree_fit, 
+#            main = paste("Decision tree with no constrains" ),
+#            type = 4,
+#            under = TRUE, box.palette = c(Urbancolor, Ruralcolor),
+#            clip.right.labs = FALSE, branch = .3)
+
+
+```
+As one see, a tree can be very complex and may be too specific to the data set used to build it. It may not be very good at predicting a new data set and is prone to overfitting. 
+
+# Fitting a tree based on max depth
+
+A standard approach to training is by optimizing based on the **max depth** of the tree, to do this we set *method = "rpart2"*. This can be useful when you begin to explore the data and you don't know how difficult the data is to analyze, and how complex the tree might become without any constraints. 
+
+
+We will fit a decision tree using both *rpart* and *rpart2*. We begin with rpart2 as this can give an insight into how difficult the problem is to predict.
+
+```{r}
+set.seed(777)
+
+maxdepth_tree_fit <- train(Residence ~., 
+                 data = train_data,
+                 method = "rpart2",
+                  tuneLength = 10,
+                 trControl = K5_CV_seed)
+
+maxdepth_tree_fit
+```
+
+
+Already with very low maximum depth we achieve good in-sample accuracy and good values on *Kappa*. The algorithm chose max depth = 11 as the optimal max depth to set, as anything after that does not seem to increase the performance of the fitted decision tree.
+
+We can then visualize the tuning of the max depth parameter to see if we agree with the choice of max **depth = 11**:
+
+```{r depthtune}
+ggplot(maxdepth_tree_fit) +
+  ggtitle("Decision Tree - Tuning Maximum Depth") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+It seems like **11** is a reasonable choice for fitting the tree. The improvement seen by over doubling the trees maximum depth from 5 to 11 is rather modest, however even a complex tree is rather fast to use once we have trained it. So unless there is suspicion that the tree wont generalize well outside of the training data due to overfitting, we can use this tree as the training process for a single tree was fast.
+
+## Visualizing the tree with optimal depth
+
+We can then visualize the decision tree:
+
+```{r depthtree }
+fancyRpartPlot(maxdepth_tree_fit$finalModel, 
+               caption = "Tree Selected (max depth = 11)")
+
+# rpart.plot(maxdepth_tree_fit$finalModel, 
+#            main = "Tree Selected (max depth = 11)" ,
+#            type = 4,
+#            under = TRUE, box.palette = c(Urbancolor, Ruralcolor),
+#            clip.right.labs = FALSE, branch = .3)
+
+```
+
+
+## Evaluating Model Performance 
+
+We can also assess the decision trees out of sample performance:
+
+```{r}
+maxdepth_tree_pred <- predict(maxdepth_tree_fit, validation_data)
+confusionMatrix(maxdepth_tree_pred, validation_data$Residence, positive = "Rural")
+```
+
+
+It appears the accuracy, kappa, and true positive rate (Sensitivity) is high, and the false positive rate (1 - specificity) is low, indicating that the model performs well on out of sample data. 
+
+## Feature importance
+
+Visualizing the feature importance of the decision trees gives an insight into which features are useful in predicting rural or urban residency:
+
+```{r depthVIF}
+theme_models <- theme(plot.title = element_text(hjust = 0.5),
+               legend.position = "none") 
+
+RF_varImp <- data.frame(variables = row.names(varImp(maxdepth_tree_fit)$importance), varImp(maxdepth_tree_fit)$importance)
+
+ggplot(data = RF_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall)) +
+  coord_flip() + 
+  geom_bar(stat = "identity", position = "dodge", fill = SIAP.color) +
+  theme_minimal()+
+  theme_models +
+  labs(x = "", y = "",
+       title= "Feature Importance", 
+       subtitle = "Decision Tree with optimized max depth") 
+```
+
+
+As expected the population *density* will be an important factor here, other than that it seems like the *wealth* related variables also are important to be able to predict the type of *residence*.
+
+
+# Fitting a tree based on the complexity parameter
+
+
+## Complexity Parameter
+
+The **complexity parameter** $C_p$ governs the trade-off between tree size and its
+accuracy to classify the data. The formal definition is: 
+
+$$
+D_{C_p}(T) = D(T) + C_p \cdot |T|
+$$
+where:
+
+* $D(T)$ is the  **total impurity** of a tree as measured by the sum of impurities on all nodes $D(T) =  \sum_{\kappa=1}^{K} D_{\kappa}$
+* $|T|$ is the number of terminal nodes of the tree.
+
+The complexity parameter is used to "penalize" the number of terminal nodes $T$ in the search of a tree with a minimal impurity.  
+
+* A model with $C_p$ = 0 will impose no constrains
+* A value of $C_p = 1$ will result in a degenerate tree with no splits and only one terminal (and initial) node.
+
+Using a too large **complexity parameter** will result in a small tree that underfits, whereas using a small value for the **complexity parameter** will result in large trees, specific to the training data set and prone to overfitting. 
+
+In order to select the *hyperparameters* of the model, we create a grid of values for the **complexity parameter** and fit a tree for each of these values along the grid to see what gives the best performance using a 5-fold cross validation. 
+
+Setting *method = "rpart"* when you train using caret the tree will be optimized by tuning the **complexity parameter**.^[see the [*rpart* vignette]( https://cran.r-project.org/web/packages/rpart/vignettes/longintro.pdf)   ]
+
+
+We now fit a new tree instead based on the complexity parameter. We create a grid of values that we want to try for the complexity parameter, and we fit a cross validated decision tree for each value in the grid:
+
+```{r}
+set.seed(777)
+
+cp_grid <- expand.grid(cp = seq(from = 0, to = 0.01, by = 0.001))
+cp_tree_fit <- train(Residence ~., 
+                 data = train_data,
+                 method = "rpart",
+                 trControl = K5_CV_seed, 
+                 tuneGrid = cp_grid)
+
+cp_tree_fit
+```
+
+
+From the results of the algorithm the model keeps improving with a smaller and smaller value of CP. In the end it prefers using an unconstrained tree as this is when the performance of the tree is the best, which is when the value of CP is 0.
+
+
+
+```{r Cptune }
+ggplot(cp_tree_fit) +
+  ggtitle("Decision Tree - Tuning Complexity Parameter Cp") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+From the figure we can see that using a value of 0 we achieve near perfect accuracy on the training data. When the CP is 0 there is no constraints on how much the decision tree can grow. As long as it keeps improving it will become more complex. 
+
+
+## Visualizing the tree with optimized $C_p$
+
+As before we visualize the tree. 
+```{r Cptree}
+fancyRpartPlot(cp_tree_fit$finalModel, caption = "Tree with optimized Cp")
+```
+
+
+As we can see the decision tree is highly complex, this is because we enforce no constraints on how deep the tree can get. If interpretation of the decision tree is important this will not be usable, as it is far too complex to interpret. 
+
+
+## Evaluating Model Performance 
+
+Given the complexity of this tree we should explore its out of sample performance, to make sure it isn't overfitting:
+
+```{r }
+cp_tree_pred <- predict(cp_tree_fit, validation_data)
+confusionMatrix(cp_tree_pred, validation_data$Residence, positive = "Rural")
+```
+
+It appears that even the out of sample performance is extraordinary. The model seems to generalize really well, with no decrease in performance it shows no sign of overfitting despite being very complex.
+
+
+## Feature importance
+
+Like before we can explore which features are important in the decision tree:
+
+```{r CpVIF}
+theme_models <- theme(plot.title = element_text(hjust = 0.5),
+               legend.position = "none") 
+
+RF_varImp <- data.frame(variables = row.names(varImp(cp_tree_fit)$importance), varImp(cp_tree_fit)$importance)
+ggplot(data = RF_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall)) +
+  coord_flip() +
+  geom_bar(stat = "identity", position = "dodge", fill = SIAP.color) +
+  theme_minimal()+
+  theme_models +
+  labs(x = "", y = "",
+       title= "Feature Importance", 
+       subtitle = "Decision Tree with optimized Cp") 
+```
+
+While population *density* and *wealth* still are the most important features, *aridity* is deemed to be important as well by this tree, unlike the previous tree. 
+
+
+
+# Pruning a tree
+
+> Since decision tree does not have any way to regularize, how can we prevent overfitting?
+
+As we saw before when we visualized the tree it can quickly become quite large, sometimes unnecessarily large. There are several techniques you can use with decision trees to try and prevent this overfitting. There are early stopping criterion to prevent the tree from becoming too large. Examples of these are setting a maximum depth, a minimum number of training samples in each leaf node, a maximum amount of leaf nodes, and a threshold that sets the minimum decrease of impurity in a node needed to determine if a node will split again or if it will become a leaf node. 
+
+A common approach is to use a mixture of these. When fitting the tree we can set a maximum depth, and then once its fitted we go back and *prune* the tree to make it generalize better if that is needed, this would also make the tree easier to interpret. Using the *prune()* function in *rpart* we can prune the tree based on a chosen complexity parameter. This removes the least important nodes of the fitted tree.
+
+
+```{r prunedtree}
+# Prunes the tree
+pruned_tree <- prune(cp_tree_fit$finalModel, cp = 0.005)
+fancyRpartPlot(pruned_tree, caption = "Pruned tree")
+```
+
+By using pruning we can reduce the complexity of the tree by quite a bit, and it is now quite easy to interpret. Pruning the tree will often result in a performance decrease, but it makes the tree easier to understand. This is a trade-off that you need to choose when you work with your data.
+
+
+
+# Wrap up
+
+- There is no need to scale the data before fitting decision trees
+- Trees are simple and easy to interpret
+- Each node is a split based on a threshold
+- Splits are determined to maximize some measure of accuracy in each strata of the predictors' space
+- Regression trees apply the same logic, with different criteria and values
+- Overfitting is a common problem, we can optimize the complexity of the decision tree with Cross Validation
+- One can select the depth of a tree or its complexity and prune it
+- Trees are very specific, not robust and prone to overfitting
+- There are powerful methods using many trees... 
+
+
+
+
+# Corresponding functions if you use Python
+
+- *pandas* and *numpy* offer great functions for handling your data.
+- The package *sklearn* has functions to both fit the trees:
+  - *sklearn.tree.DecisionTreeClassifier()*, as well as visualizing them:
+  - *sklearn.tree.export_graphviz()*.
+- *matplotlib* has good visualizations for your data and feature importance. 
+
+
+
+
+
+
+
+
+

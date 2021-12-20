@@ -1,0 +1,702 @@
+---
+title: "Machine Learning Course"
+subtitle: "Machine Learning with Logistic Regression: an Example"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson - SIAP
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, results =TRUE, echo = TRUE) 
+
+```
+
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+
+```
+
+
+`r if(knitr:::pandoc_to() == "latex") {paste("\\large")}` 
+
+
+```{r packages, include=FALSE}
+# Data management packages
+library(dplyr)
+library(forcats)
+library(here)
+
+# Plotting packages
+library(ggplot2)
+library(ggcorrplot)
+library(RColorBrewer)
+library(purrr)
+library(naniar)
+
+# Model fitting packages
+library(caret)
+library(glmnet)
+library(regclass)
+library(MLmetrics)
+library(pROC)
+library(MASS)
+library(ROSE)
+library(e1071)
+
+# SMOTE specific packages
+library(smotefamily)
+library(tidymodels) 
+library(themis)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+
+# Nice tables
+library(xtable)
+library(kableExtra)
+library(modelsummary)
+
+```
+
+# Introduction
+
+In this file, we present a complete analysis of a real data set using a logistic regression method in a machine learning framework. We will use parts of a [DHS survey](https://dhsprogram.com/data/available-datasets.cfm) data from Bangladesh coupled with some geospatial data to try and predict Child marriage under 15 years of age, with the help of a few explanatory variables from the DHS Survey. We begin by doing data pre-processing and some exploratory data analysis before fitting a model. We will then evaluate the fitted model and explore it's in-sample and out-of-sample predictive performance. Some optimization of the fitted model will be tested using ROC-curves and the *SMOTE* algorithm to see if they can improve the results.
+
+
+#### Data Pre-processing 
+
+We begin by loading the data set into R and selecting some columns that might be relevant for explaining whether child marriage will take place or not. We also do some pre-processing to make the categorical variables into factors, which R will require for doing computations on the data. 
+
+```{r}
+
+# Reading DHS survey data from the SIAP's server
+
+ChildMarriagedf <- read.csv(here("../data/ChildMarriage.csv"))
+
+# Explanation of data sets variables can be found here: https://dhsprogram.com/pubs/pdf/DHSG4/Recode7_DHS_10Sep2018_DHSG4.pdf
+
+# Filters the data set down to a few variables
+ChildMarriage <- ChildMarriagedf %>% 
+  dplyr::select(Before15 = Before15, Residence = HV025, Aridity = Aridity2015,
+                WealthIndex = aWealthIndex2011, Density = Density2015,
+                Education = Education, Age = Age)
+
+
+# Makes the categorical variables into factors
+factor_columns <- c('Before15', 'Residence', 'Education')
+ChildMarriage[factor_columns] <- lapply(ChildMarriage[factor_columns], factor)
+levels(ChildMarriage$Before15) <- c("Unmarried", "Married")
+
+
+# We remove a few observations which has missing some missing values
+ChildMarriage  <- ChildMarriage %>% na.omit() 
+
+```
+
+#### Variables description
+
+```{r}
+datasummary_skim(ChildMarriage, type = "categorical" )
+datasummary_skim(ChildMarriage, type = "numeric")
+```
+
+
+# Explorative Data Analysis
+
+Once the preprocessing is done we can begin to explore the data. To begin with we explore the correlation between the numerical variables in the data. This can give some insight into if there may be potential redundancies in a fitted model:
+
+```{r}
+
+
+# We compute the correlation matrix of the covariates
+corr_coef<-cor(ChildMarriage[,c(3,4,5,7)],use = "p")
+#And then plot it with nice options 
+ggcorrplot(corr_coef, 
+           type = "lower",         # lower triangle of the matrix only
+           hc.order = TRUE,        # variable sorted from highest to lowest
+           outline.col = "white",  #Color options
+           lab = TRUE) + ggtitle("Correlation between numerical variables")
+```
+
+The only strong correlation that appears among the numerical explanatory variables is between *WealthIndex* and *Density*, which is not too surprising as population density is higher in larger cities where the wealth on average can be higher. When fitting the model these two variables should be monitored to see if both are needed to explain *Child Marriage*.
+
+We also want to see the distribution of the target variable *Before15*, this is a binary variable that takes on the values *Married* or *Unmarried*, depending on if a woman was married before the age of 15. Imbalances in the distribution of the target variable is a common problem and can affect not only the model performance but also change how we need to evaluate the model.
+
+```{r}
+pChild <-ggplot(ChildMarriage) + geom_bar(aes(y = Before15), colour="white", fill = SIAP.color) +
+          theme_minimal() + 
+          theme(plot.title = element_text(hjust = 0.5))+ 
+          labs(x = "", y = "") +
+          ggtitle("Distribution of Child Marriage (Before age 15)")
+pChild
+```
+
+
+We observe some imbalance in the target variable, as the *Married* factor level is more uncommon than the *Unmarried* one.
+
+> Datasets with heavily imbalanced target variables can suffer in regards to predictions, as the model can simply predict the majority class and still achieve a high accuracy.
+
+Problems with class imbalance is not uncommon and they can in many cases be improved. We will cover the *SMOTE* algorithm as a method to try and improve the imbalanced through oversampling the minority class in the second part of this analysis.
+
+# Machine Learning settings
+
+In a machine learning framework, we *learn*  from the repetition of a process that implies splitting the data into two distinct sets. While we ideally want to use as much data as possible to train our model, we need to be able to assess the models predictive performance both "*in sample*" which are on a sample that we use to train the model on, and "*out of sample*" which are new "unseen" observations that weren't used during the model fitting process. So we will split the original data set into:
+
+- A first data set,  the **training** data set (typically 80% of the data) is used for training the model and doing in-sample predictions. 
+- A second data set, the **validation** (or **test**) data set, (the remaining part, typically 20%)  is used for predicting out-of-sample values on data *unseen* by the model.
+
+
+
+
+## Splitting the data
+
+
+```{r}
+set.seed(1235)
+trainIndex <- createDataPartition(ChildMarriage$Before15, p = 0.8, 
+                                  list = FALSE, 
+                                  times = 1)
+train_data <- ChildMarriage[ trainIndex,]
+validation_data  <- ChildMarriage[-trainIndex,]
+```
+
+
+
+> Can you think of any potential issue that still remains even if we split our data into a training and testing part? 
+
+We almost always make the assumption that future data is in the same distribution as our training data. However, this is very rarely the case. By the time we get to train a model and test it using the data we have, our data is already old. There are certain real world factors that will cause changes in the distribution of the future data that we cannot account for or prevent, but are good to keep in mind. One example of this is a temporal aspect, data collected in the future may have a different distribution simply because it is collected at a later time, as the time between your data acquisitions can affect the distribution. 
+
+##  Scaling the data
+
+It is always a good habit to scale and center the data before you fit the model. This will ensure that the variables that are measured at similar scales so their contribution to the analysis is equal and does not create any bias. In addition to this there is also an added benefit of numerical precision when we normalize or standardize the data. 
+
+```{r}
+# Scale the training and test data based on the training data mean and variance.
+ScalingValues <- preProcess(train_data, method = c("center", "scale"))
+train_data <- predict(ScalingValues, train_data)
+validation_data <- predict(ScalingValues, validation_data)
+```
+
+> Why do we scale the testing data using parameters from the training data?
+
+If we were to scale the testing part before we split, i.e. using all data, our test data will embed some elements from the training data set and is not *unseen* by the time we use it to validate our model which defeats the point of splitting the data into training and validation. Also, if we scale the testing data independently,  our predictions may become skewed. This is due to our model being trained using the scale and centering of the training data, so any deviation in the validation data should only deviate from the data we train it upon. 
+
+## Model fitting on the training set
+
+We can then fit a logistic regression model using **Child Marriage** as target variable, and the rest of the data set as explanatory variables.
+
+```{r, cache = TRUE}
+
+
+log_fit = train(
+  form = Before15 ~ .,
+  data = train_data,
+  trControl = trainControl(method = "cv", number = 5), # Fit model using 5-fold CV
+  method = "glm",
+  family = "binomial")
+```
+
+```{r}
+xtable(summary(log_fit)) %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+From the printed table we can see that most variables are deemed useful. Only the **Density** variable seems to be less important to the model, which can be because of the previously seen strong correlation with **WealthIndex**. The variable still appears to have some value, so we'll keep it in our model for now.
+
+
+## Variable importance
+
+Another way of understanding the model is to visualize feature importance, a high feature importance score will indicate that the feature is desirable to keep in the model.
+
+```{r}
+
+theme_models <-  theme_minimal()+ theme(plot.title = element_text(hjust = 0.5),
+                legend.position = "none") 
+
+Logistic_varImp <- data.frame(variables = row.names(varImp(log_fit)$importance), varImp(log_fit)$importance)
+
+ggplot(data = Logistic_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Logistic Regression") 
+```
+
+It appears higher *education* is an important feature, as well as *Aridity* and *Age*. The *Density* variable does not appear to be useful according to this visualization.
+
+# Evaluation metrics
+
+## Specificity *vs* Sensitivity & Kappa
+
+
+
+When evaluating prediction there are several metrics that should be taken into account. The simplest one being accuracy which corresponds to the fraction of prediction that we classified correctly using our model. In the case of binary classification this will be:
+
+$$ \frac{True Positives + True Negatives}{ True Positives + True Negatives + False Positives + False Negatives}$$
+As mentioned before **accuracy** does not work as well when there is heavy imbalance between classes. If 90% of the data corresponds to one class, then you can reach 90% accuracy by simply guessing that class for all observations in the data. **Accuracy** also does not give information about what type of mistake you are making, which can be important if one mistake is more costly to make than the other.
+
+To avoid the downsides of accuracy there are alternative metrics such as **Kappa**, **Sensitivity**, and **Specificity** can be used instead:
+
+
+$$ Sensitivity = \frac{True Positives}{True Positives + False Negatives}$$
+In our case **Sensitivity** will correspond to how many of the observations we are able to classify as married under the age of 15 out of all the observations that were married before the age of 15.
+
+
+$$ Specificity = \frac{True Negatives}{True Negatives + False Positives}$$
+Whereas **specificity** corresponds to the fraction of observations who where correctly classified as unmarried before the age of 15, out of all the observations that weren't marriage before the age of 15. If we want to know the false positive rate we can do this by calculating $1-Specificity$.
+
+Finally **Kappa** is similar to the classic accuracy measure, but it is able to take into consideration the data sets class imbalance.
+
+$$ \kappa = \frac{p_o-p_e}{1-p_e}  $$
+
+For binary classification **Kappa** can be rewritten as an expression of True Positives (TP), False Negatives (FN), False Negatives (FN), and False Positives (FP):
+
+$$ \kappa = \frac{2(TP \cdot TN - FN \cdot FP)}{(TP + FP) \cdot (FP + TN)+ (TP+FN) \cdot (FN + TN)} $$
+
+where $p_o$ is the accuracy of the model, and $p_e$ is the measure of the agreement between the model predictions and the actual class values as if happening by chance. The *Kappa* value indicates how much better the model is performing compared to a different model that makes random classifications based on the distribution of the target variable.
+
+
+
+## ROC-Curve (receiver operating characteristic curve)
+
+By default when we predict we use a threshold of 0.5 to distinguish between the Married and Unmarried. However, we know from before that the distribution is not 50/50, so maybe there is a more suitable threshold we can use to optimize our predictions? 
+
+Using a *ROC* curve we can evaluate the models classification performance at each classification threshold from 0 to 1 by visualizing the True Positive rate against the False Positive rate. The *AUC* (area under the ROC curve) can be calculated from the *ROC* curve, the value of the *AUC* is bound between 0 and 1, where 0 indicates that the model is completely wrong in it's predictions and 1 means that it classifies everything correctly.
+
+Using functions from the *pROC* package we can easily estimate this on our partitioned test data:
+
+
+> Hover the mouse on the ROC curve below to see the values of the threshold
+
+```{r}
+# Estimating with a logit classifier
+pprob <- predict(log_fit, validation_data, type = "prob")
+
+# Computing the ROC curve (specificity, Sensitivity) for many threshold
+twoclassesROC <- roc(validation_data$Before15, pprob$Married)
+
+# Gathering the results
+myROC <- data.frame(cbind(twoclassesROC$specificities,
+                          twoclassesROC$sensitivities, 
+                          twoclassesROC$thresholds)) %>% 
+  mutate_if(is.numeric, ~ifelse(abs(.) == Inf,NA,.)) %>%
+  mutate(FPR = 1- X1, 
+         threshold = round(X3, 2)) %>%
+  rename(Specificity = X1, 
+         TPR = X2) 
+    
+# Computes the point which corresponds to the optimal threshold
+coords <- coords(twoclassesROC, "best", ret = "all", transpose = FALSE)
+
+# Computing the AUC
+twoclassesAUC <-  pROC::auc(twoclassesROC)
+
+# Visualizing
+pRoc <- myROC%>%
+  distinct(FPR, .keep_all = TRUE) %>%
+ggplot() +
+ aes(x = FPR, y = TPR, label =  threshold) +
+ geom_line( colour = "red") +
+# Adding the optimal threshold
+ geom_point(aes(x = coords$`1-specificity`, y = coords$sensitivity), colour= "red") +
+ labs(x = "FPR (1- Specificity)", 
+      y = "TPR (sensitivity)", 
+      title = "ROC curve",
+      subtitle =paste("(AUC = ", round(twoclassesAUC, 3), ")") ) +
+ theme_minimal()
+
+# Computing the  diagonal
+pRoc <- pRoc +  geom_segment(aes(x = 1, xend = 0, y = 1, yend = 0), color="darkgrey", linetype="dashed")
+
+# Interactive version (requires plotly package)
+library(plotly)
+ggplotly(pRoc, tooltip = "label")
+```
+
+
+From the ROC curve we see that using a threshold of **`r round(coords$threshold, 2)`** (red point) instead of the default threshold of 0.5 should give more reliable predictions. Using this ROC curve we can also visualize the area under the curve:
+
+
+```{r AUCfig}
+# Computing the AUC 
+pAUC <- myROC%>%
+  distinct(FPR, .keep_all = TRUE) %>%
+ggplot() +
+ aes(x = FPR, y = TPR) +
+  geom_area(aes (x= FPR, y = TPR), 
+            fill= SIAP.color, 
+            color = "red",  alpha = 0.5)+
+   labs(x = "FPR (1- Specificity)", 
+      y = "TPR (sensitivity)", 
+      title = "ROC curve and AUC",
+      subtitle =paste("(AUC = ", round(twoclassesAUC, 3), ")") ) +
+ theme_minimal()
+pAUC
+  
+```
+
+With an AUC of `r round(twoclassesAUC, 3)`,  it means our results are acceptable, but by no means great. 
+
+
+# Model Predictions
+
+## In sample predictions based on different thresholds
+
+By using the new threshold we can compare how the model performs compared to the default 0.5 threshold. We begin by computing the confusion matrix using the default threshold of 0.5: 
+
+```{r}
+# Predict using a standard 0.5 threshold
+confusionMatrix(table(predict(log_fit, type="prob")[,"Married"] >= 0.5, train_data$Before15 == "Married"))
+```
+
+While the **accuracy** using a 0.5 threshold is decent, the **Kappa** and **specificity** statistic are low, meaning that our model has a tendency to predict that women are married under the age of 15 more often than they actually are.
+
+With the threshold of `r round(coords$threshold, 3)` we get the following confusion matrix:
+
+```{r}
+# Predicting based on optimal threshold according to the coords() function above
+confmat_IS <- confusionMatrix(table(predict(log_fit, type="prob")[,"Married"] >= coords$threshold, train_data$Before15 == "Married"))
+confmat_IS
+```
+
+
+From changing the threshold we see that we do get overall lower **accuracy**, however the **Kappa** statistic does increase, which is desirable as it was a problem in our model. We can also see that this came at a cost of **Sensitivity**, as now we are less able to find the true cases where child marriage existed in our data.
+
+> Do all types predictive errors have the same cost associated with them?  Is it sometimes desirable to have high Sensitivity or Specificity?
+
+One typical example where what type of error is important is in the medical field. Misdiagnosing a patient as healthy when they have a serious condition may lead to worse outcomes than to say a healthy patient has a disease, as this would most likely lead to more testing, rather than the patient being discharged.
+
+## Out of sample predictions based on different thresholds
+
+The model can also be tested on out-of-sample observations (*validation* or *test* set)  to see if it generalizes well: 
+
+```{r}
+# Predict using a standard 0.5 threshold
+confmat_OOS <- confusionMatrix(table(predict(log_fit, newdata = validation_data, type="prob")[,"Married"] >= 0.5, validation_data$Before15 == "Married"))
+confmat_OOS
+```
+
+The accuracy is here `r round(confmat_OOS$overall[1], 3)` even better than the one observed in-sample `r round(confmat_IS$overall[1], 3)`. However, we see that the Specificity is really low,  `r round(confmat_OOS$byClass[2], 3)`, as compared to the Sensitivity `r round(confmat_OOS$byClass[1], 3)`. This is probably due to the imbalanced nature of our data set, and to the choice of the default threshold (0.5).
+
+> Let us see if the we can change the classification by using a better threshold, such as the one selected using the ROC curve, here `r round(coords$threshold, 2)`. 
+
+```{r}
+# Predicting based on optimal threshold according to the coords() function above
+confmat_OOS_NewT <-confusionMatrix(table(predict(log_fit, newdata = validation_data, type="prob")[,"Married"] >= coords$threshold, validation_data$Before15 == "Married"))
+confmat_OOS_NewT
+```
+
+
+>Selecting a new threshold helped balancing the Specificity, now at  `r round(confmat_OOS_NewT$byClass[2], 3)`,  and the Sensitivity, now at `r round(confmat_OOS_NewT$byClass[1], 3)`.  
+
+The *kappa* $\kappa$,  is logically **improved**, now at `r round(confmat_OOS_NewT$overall[2], 3)` while it was  at `r round(confmat_OOS$overall[2], 3)` with the default threshold, but surprisingly at the cost of a **lower** overall accuracy, now only at  `r round(confmat_OOS_NewT$overall[1], 3)`. 
+This  highlights the importance of the choice of the threshold in applied work with imbalanced data sets.  
+
+
+# SMOTE-Algorithm 
+
+Using the SMOTE  (*Synthetic Minority Oversampling Technique*) algorithm we can oversample a minority class and/or undersample a majority class. Recall that the distribution of the target variable *Before15* was somewhat imbalanced, with roughly 30% of the observation being part of the minority class. 
+```{r}
+pChild
+```
+
+
+While this isn't an extreme imbalance in the data it still may be worth exploring if oversampling the minority class *Married* can still lead to improvements in the model. We therefore use **SMOTE** to oversample the minority class: 
+
+
+```{r}
+
+numeric_columns <- c('Residence', 'Education')
+train_data[numeric_columns] <- lapply(train_data[numeric_columns], as.numeric)
+
+# step_smote() requires factors to be numeric, these must later be set as factors before fitting the new model.
+SMOTE_data <- recipe(Before15 ~ ., data = train_data) %>%
+  step_smote(Before15)%>%
+  prep() %>%
+  bake(new_data = NULL) 
+
+```
+
+
+
+```{r}
+# Round the columns before turning them back to factors or we get more factor levels due to decimals
+SMOTE_data$Residence <- round(SMOTE_data$Residence, digits = 0)
+SMOTE_data$Education <- round(SMOTE_data$Education , digits = 0)
+numeric_columns <- c('Residence','Education')
+SMOTE_data[numeric_columns] <- lapply(SMOTE_data[numeric_columns], factor)
+
+xtable(summary(SMOTE_data)) %>%
+  kable(digits=2) %>%
+  kable_styling()
+
+```
+
+After oversampling the target variable *Before15* it now has an equal amount of observations for each of the two possible values. A new model can then be fitted based on the new data set.
+
+
+```{r, cache = TRUE}
+# Fit a new model using the balanced data generated by the SMOTE algorithm
+SMOTE_fit = train(
+  form = Before15 ~ .,
+  data = SMOTE_data,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "glm",
+  family = "binomial")
+```
+
+
+
+```{r}
+xtable(summary(SMOTE_fit)) %>%
+  kable(digits=2) %>%
+  kable_styling()
+
+```
+
+Like before we can visualize which features are important for the logistic regression model that is fitted using the SMOTE-based data:
+
+```{r}
+
+Logistic_varImp <- data.frame(variables = row.names(varImp(SMOTE_fit)$importance), varImp(SMOTE_fit)$importance)
+
+ggplot(data = Logistic_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Logistic Regression using SMOTE") 
+```
+
+As before higher *education* seems to be favored by the model as well as the *Aridity* and the *Age* variable. 
+
+
+```{r}
+numeric_columns <- c('Residence', 'Education')
+validation_data[numeric_columns] <- lapply(validation_data[numeric_columns], as.numeric)
+validation_data[numeric_columns] <- lapply(validation_data[numeric_columns], factor)
+pprob <- predict(SMOTE_fit, validation_data, type = "prob")
+SMOTE_ROC <- roc(validation_data$Before15, pprob[,"Married"])
+```
+
+
+
+### In sample SMOTE predictions
+
+
+```{r}
+# 0.5 as predictive threshold
+
+SMOTE_confmat_IS <- confusionMatrix(table(predict(SMOTE_fit, type="prob")[,"Married"] >= 0.5, SMOTE_data$Before15 == "Married") )
+SMOTE_confmat_IS
+```
+
+
+### Out of sample SMOTE predictions
+
+
+```{r}
+# 0.5 as predictive threshold
+SMOTE_confmat_OOS <- confusionMatrix(table(predict(SMOTE_fit, newdata = validation_data, type="prob")[,"Married"] >= 0.5, validation_data$Before15 == "Married"))
+SMOTE_confmat_OOS
+```
+
+
+
+When comparing the evaluation metrics between the models using the regular data and the oversampled data using **SMOTE** it does increase the **Kappa**, so even if our data set does not contain an extreme imbalance in the target variable we still can still get improvements in our prediction by oversampling the minority class. This does come at the cost of **Sensitivity**, and it is worth reflecting on the what the cost is when you decrease the **Sensitivity**. 
+
+
+### Visualizing the difference between the models
+
+It is easier to visualize the differences between models. We can evaluate the logistic regression model and the **SMOTE** sampled regression model both in sample (*IS*) and out of sample (*OOS*). We start with visualizing the **sensitivity**, the true positive rate:
+
+```{r}
+# Extract the sensitivity from the confusion matrices
+Sensitivity <- c(confmat_IS$byClass[1],
+        SMOTE_confmat_IS$byClass[1],
+        confmat_OOS$byClass[1],
+        SMOTE_confmat_OOS$byClass[1])
+                    
+models_list <- c("Logit IS",
+                 "SMOTE IS",
+                 "Logit OOS",
+                 "SMOTE OOS")
+Sensitivity_table <- data.frame(Model = models_list, 
+           Sensitivity = Sensitivity)
+
+# Keep only 3 digits
+Sensitivity_table$Sensitivity <- round(Sensitivity_table$Sensitivity,3)
+
+ggplot(data = Sensitivity_table, 
+       aes(x = fct_reorder(Model, Sensitivity, .desc = T),
+           y = Sensitivity,
+           fill = Model)) +
+  geom_bar(stat = "identity", alpha=0.5) + 
+  labs(x = "", y = "Sensitivity") +
+  geom_text(aes(label = Sensitivity, vjust = -0.3)) +
+  theme_minimal() +
+  ggtitle("Model performance by Sensitivity (TPR)")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+From this figure it appears the true positive rate for the logistic regression model out of sample performs incredibly well, meaning that it is able to predict in which observations child marriage before the age of 15 took place. However, we need to do some further analysis to see if these results are trustworthy or not. The **SMOTE** based results seems to have similar performance in and out of sample which is a good indicator that it generalizes well. 
+
+
+Further we visualize the false positive rate:   
+
+```{r}
+# Extract the specificity from the confusion matrices
+Specificity <- c(confmat_IS$byClass[2],
+        SMOTE_confmat_IS$byClass[2],
+        confmat_OOS$byClass[2],
+        SMOTE_confmat_OOS$byClass[2])
+                    
+models_list <- c("Logit IS",
+                 "SMOTE IS",
+                 "Logit OOS",
+                 "SMOTE OOS")
+
+Specificity_table <- data.frame(Model = models_list, 
+           Specificity = Specificity)
+
+# Keep only 3 digits
+Specificity_table$Specificity <- round(Specificity_table$Specificity,3)
+
+# Use the specificity to calculate the false positive rate
+Specificity_table$`1-Specificity` <- 1-Specificity_table$Specificity
+
+ggplot(data = Specificity_table, 
+       aes(x = fct_reorder(Model, `1-Specificity`, .desc = T),
+           y = `1-Specificity`,
+           fill = Model)) +
+  geom_bar(stat = "identity", alpha=0.5) + 
+  labs(x = "", y = "1-Specificity (FPR)") +
+  geom_text(aes(label = `1-Specificity`, vjust = -0.3)) +
+  theme_minimal() +
+  ggtitle("Model performance by 1-Specificity (FPR)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+We observe that the logit models has a far greater out of sample false positive rate than it's in sample counterpart and also compared to the **SMOTE** based model. This confirms that the high **sensitivity** in the previous figure was suspicious, it appears that it achieved a high **sensitivity** simply due to just predicting the majority class, since the false positive rate is so high. Once again we find a good balance in and out of sample for the **SMOTE** model, even though the false positive rate is higher than we would want it to be.
+
+
+We can also visualize the balanced accuracy, this is a tool that can be used in binary classification which takes into account any potential class imbalance by taking into account both the sensitivity and the specificity:
+
+$$ Balanced Accuracy = \frac{Sensitivity + Specificity}{2} $$
+
+```{r}
+# Extract the balanced accuracy from the confusion matrices
+Balanced_Accuracy <- c(confmat_IS$byClass[11],
+                       SMOTE_confmat_IS$byClass[11],
+                       confmat_OOS$byClass[11],
+                       SMOTE_confmat_OOS$byClass[11])
+                    
+models_list <- c("Logit IS",
+                  "SMOTE IS",
+                  "Logit OOS",
+                  "SMOTE OOS")
+
+Balanced_Accuracy_table <- data.frame(Model = models_list, Balanced_Accuracy = Balanced_Accuracy)
+ 
+# Keep only 3 digits
+Balanced_Accuracy_table$Balanced_Accuracy <- round(Balanced_Accuracy_table$Balanced_Accuracy,3)
+
+ggplot(data = Balanced_Accuracy_table, 
+       aes(x = fct_reorder(Model, Balanced_Accuracy, .desc = T),
+           y = Balanced_Accuracy,
+           fill = Model)) +
+       geom_bar(stat = "identity", alpha=0.5) + 
+       labs(x = "", y = "Balanced Accuracy") +
+       geom_text(aes(label = Balanced_Accuracy, vjust = -0.3)) +
+       theme_minimal() +
+       ggtitle("Model performance by Balanced Accuracy") +
+       theme(plot.title = element_text(hjust = 0.5))
+```
+
+For the balanced accuracy we see that the out of sample accuracy without **SMOTE** is lower. Comparing the SMOTE vs regular logistic regression we also see a discrepancy between in and out of sample balanced accuracy, indicating that using **SMOTE** makes the model generalize better.
+
+Lastly, we visualize the Kappa statistic: 
+
+```{r}
+# Extract the balanced accuracy from the confusion matrices
+Kappa <- c(confmat_IS$overall[2],
+           SMOTE_confmat_IS$overall[2],
+           confmat_OOS$overall[2],
+           SMOTE_confmat_OOS$overall[2])
+                    
+models_list <- c("Logit IS",
+                  "SMOTE IS",
+                  "Logit OOS",
+                  "SMOTE OOS")
+
+Kappa_table <- data.frame(Model = models_list, Kappa = Kappa)
+ 
+# Keep only 3 digits
+Kappa_table$Kappa <- round(Kappa_table$Kappa,3)
+
+ggplot(data = Kappa_table, 
+       aes(x = fct_reorder(Model, Kappa, .desc = T),
+           y = Kappa,
+           fill = Model)) +
+       geom_bar(stat = "identity", alpha=0.5) + 
+       labs(x = "", y = "Kappa") +
+       geom_text(aes(label = Kappa, vjust = -0.3)) +
+       theme_minimal() +
+       ggtitle("Model performance by Kappa") +
+       theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Once again we observe a big discrepancy between the logistic regression fit in and out of sample, but only when we do not use the **SMOTE** sampling technique. Considering the results of all these visualizations if we have a difficult problem to try and explain, even if we don't manage to increase the predictive accuracy of the model using sampling techniques, there are other benefits we gain by using them.  
+
+
+# Wrap up
+
+We used a real data set and applied logistic regression for a machine learning exercise. Our goal was to predict *Child marriage* (a binary variable) using the information from other DHS and environmental variables.   Several steps were involved, but here are some points to remember:
+
+- Data Analysis is important to identify some important features of the data set (such as imbalance) as well as to discover the correlation between variables
+- Machine learning requires splitting the data into a *training* data set, and a *validation* (or *test*) data set. 
+- We scale the testing data based on parameters in the training part, as the testing data should be an independent set of data used to evaluate the model.
+- Several measures of fit can be used to evaluate the performances of a specific model and to choose some parameters such as the threshold.  
+- Using accuracy as an evaluation metric for classification performance is not enough considering all the information provided by the *confusion matrix*.
+- Splitting data into training and testing parts and performing *cross-validation*, we can see if our model is robust outside of the data used for training it.
+- By using sampling techniques like SMOTE we can create healthier models and take into account the imbalance structure of the data set
+- Comparing different models on specific measures help selecting a model that should perform well on new, *unseen* data. 
+
+
+# Corresponding functions if you use Python
+
+- pandas and numpy offer great functions for handling your data.
+- sklearn has a function linear_model.LogisticRegression(), it can also take arguments that allow for regularization as you fit your model. 
+- the library imbalanced-learn has tools for oversampling, such as the SMOTE algorithm.
+- matplotlib offers good visualizations for your results, including feature importance plots.

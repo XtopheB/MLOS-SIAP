@@ -1,3 +1,4 @@
+
 # History files
 .Rhistory
 .Rapp.history
@@ -31,9 +32,21 @@ vignettes/*.pdf
 *_cache/
 /cache/
 
+*_files/
+/files/
+
 # Temporary files created by R markdown
 *.utf8.md
 *.knit.md
 
 # R Environment Variables
 .Renviron
+
+# Knitr output
+.html
+.pdf
+.tex
+.log
+.aux
+.toc
+

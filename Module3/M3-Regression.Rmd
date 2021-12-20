@@ -1,0 +1,1290 @@
+---
+title: "Regression Based Models"
+subtitle: "Concepts and applications"
+author: 
+- Christophe Bontemps & Patrick Jonsson - SIAP^[*This document uses teaching materials developped by Pascal Lavergne* (*Toulouse School of Economics*)]
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+    extra_dependencies: ["float"]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               fig.pos = "!H", fig.align = "center",
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+```
+
+`r if(knitr:::pandoc_to() == "latex") {paste("\\large")}` 
+
+
+
+```{r Libraries, cache=FALSE, echo=FALSE}
+# ML related package 
+library(caret)
+
+# Data  
+library(dplyr)   # Data manipulation 
+library(plyr)   # Data manipulation 
+library(broom.mixed) # Tidying methods for Mixed models
+library(doSNOW)  # Parallel computing 
+library(ISLR)    # Statistical Data library 
+library(leaps)  # Regression subset
+library(jtools) # Social Data 
+
+# Nice tables
+library(xtable)
+library(kableExtra)
+library(modelsummary)
+
+# Nice graphical statistical packages
+library(ggplot2)
+library(ggcorrplot) # Correlation plots
+library(ggstance)  # Regression coef. plot
+```
+# Introduction
+
+The main focus here is on using a regression model within a Machine Learning problem when we have many regressors. We will be trying to construct a "*good model*", through variable selection algorithms and regularization techniques. 
+
+We will use an example where many regressors, possibly correlated, are used and we  will explore methods like Stepwise-regression, Ridge regression and Lasso regression as some tools to construct the "*best*" set of variables. 
+Through *Cross validation* we will also evaluate if the fitted models produces results that generalizes well.  
+
+
+## Regression model
+
+We have a linear regression model
+\[
+y  = \beta_0 + x'\beta + \varepsilon \qquad  E (\varepsilon|x)  = 0
+\, , 
+\]
+with possibly **many regressors** in $x$. The intercept is always included in the model.So we have a bunch of regressors, we would like to retain only those helpful in explaining $y$. We have already encountered this issue in the context of polynomial regression.
+
+
+```{r Data, include=FALSE}
+# The Original data set is from the ISLR Statistical Data library 
+data("Hitters")
+Hitters <- na.omit(Hitters)
+Hitters$Salary <- log(Hitters$Salary)
+
+# We transform this dataset for our example
+
+BankAccount <- Hitters %>%
+  dplyr::rename(Trans = AtBat,
+                HighTrans = Hits,          
+                Checks = HmRun   ,    
+                Dinning = Runs     ,      
+                Shopping = RBI      ,     
+                Gas = Walks   ,           
+                TotalTrans = CAtBat ,   
+                TotalHighTrans = CHits   ,
+                TotalChecks = CHmRun,  
+                TotalDinning = CRuns   ,  
+                TotalShopping = CRBI    , 
+                TotalGas = CWalks  ,      
+                Category = League   ,     
+                Agency = Division ,       
+                OnlineTrans = PutOuts ,   
+                widthdrawals = Assists ,  
+                RejectedTrans = Errors  , 
+                NewCategory = NewLeague   
+  )
+
+# Transforming  integer variables into numeric variables
+BankAccount[-c(14,15)] <- lapply(BankAccount[-c(14,15)], as.numeric)
+
+```
+
+
+Selection of regressors is an old problem, so we have many existing solutions. It is part of *feature selection* or *feature elimination* problems.   Before detailing statistical learning methods, we will look at  "variations" around the linear regression model.
+
+## An Example
+
+We will look at a data set about the salary of households in a Bank. It includes a number of characteristics for each household, many of them are activity indicators and counts. The data frame contains  322 observations on the following 20 variables:
+
+
+- Trans     = Nb of transactions in 2020        
+- HighTrans = Nb of high value transactions in 2020        
+- Checks    = Nb of Checks in 2020   
+- Dinning   = Nb of Dinnings in 2020    
+- Shopping  = Nb of Shopping purchases in 2020
+- Gas       = Nb of payments at gas stations in 2020   
+- Years     = Nb of years at the bank
+- TotalTrans      = Nb of transactions since at the bank  
+ -TotalHighTrans  = Nb of high value transactions since at the bank   
+- TotalChecks     = Nb of Checks  since at the bank 
+- TotalDinning    = Nb of Dinnings since at the bank   
+- TotalShipping   = Nb of Shopping purchases since at the bank  
+- TotalGas        = Nb of payments at gas stations since at the bank      
+- Category        = New (N) or Ancient (A) at the agency   
+- Agency          = Name of the Agency (East or West Bd)      
+- OnlineTrans     = Nb of online purchases in 2020 ,  
+- widthdrawals    = Nb of withdrawals 
+- RejectedTrans   = Nb of rejected transactions
+- NewCategory     = New (N) or Ancient (A) at the agency in 2021
+- Salary          = Salary in 2020 (thousands of dollars)
+
+##  Data Analysis
+
+```{r eval=FALSE, include=FALSE}
+dtf <- sapply(BankAccount[,-c(14,15,20)], 
+              plyr::each(min,  mean, median, max, sd, IQR), na.rm = TRUE)
+xtable(dtf) %>%  
+  kable(digits=2) %>% 
+  kable_styling()
+```
+
+It is always a good habit to start with some descriptive statistics on all the variables. 
+
+
+```{r}
+# From the library modelsummary we can create a nice summary table 
+datasummary_skim(BankAccount)
+```
+
+
+# Linear Regression and All His Friends
+The linear regression is one of the most popular tool. Let us recall some characteristics of this model. 
+
+\[
+y  = \beta_0 + \beta_1 x_1 + \ldots + \beta_{k} x_k + \varepsilon \qquad E (\varepsilon|x)  = 0
+\, .
+\]
+We know that:
+
+- $\beta_j$ is the "*ceteris paribus*" marginal effect of $x_j$ on $y$. That is *when  $x_j$  increases by one unit, and no other value change on any other $x$s, then $y$  increase by $\beta_j$ units*. 
+
+- $\beta_0$ is the mean of $y$ if all $x_j$ are equal to zero. Since it is rare that we can encounter this situation, we usually don't interpret this coefficient.
+
+> What is effect of taking the mean on both side of the regression? 
+
+
+$$
+E(y) = \beta_0  + \beta_1 E(x_1) + \cdots + \beta_{k} E(x_k)
+\, .
+$$
+or 
+$$
+\beta_0  = E(y) - \beta_1 E(x_1) - \ldots - \beta_{k} E(x_k)
+\, .
+$$
+
+## Illustration on a simplified model.
+
+To highlight some practical issues, let us use a simplified model with only a few regressors
+
+```{r}
+# Linear regression model
+reglin <- lm( Salary ~ Trans + HighTrans+ Checks + Years, data = BankAccount)
+
+# results
+summ(reglin, center = FALSE)$coeftable %>%  
+  kable(digits=3) %>% 
+  kable_styling()
+```
+
+### Centering
+
+We can center each variable by its mean to obtain
+\[
+y = \alpha_0 + \beta_1 (x_1-E(x_1)) + \ldots + \beta_{k} (x_k-E(x_k))  + \varepsilon \qquad E (\varepsilon|x)  = 0
+\, .
+\]
+
+> This does not change the coefficient $\beta_j$, $j \geq 1$, nor their interpretation.
+
+However, now $\alpha_0$ is the mean of $y$ when each $x_j$ is set at its own mean and thus  $\alpha_0 = E(y)$.
+
+```{r}
+summ(reglin, 
+     center = TRUE)$coeftable %>%
+  kable(digits=3) %>%
+  kable_styling()
+```
+The regression provides exactly the same results and coefficients $\beta_j$ except for the intercept $\alpha_0$  which is simply the sample average of $y$.
+
+In practice, we  willcenter each regressor by its empirical average and we estimate the regression model on these centered variables.
+
+
+### Scaling
+
+We can also scale each variable by its own standard deviation to obtain
+\[
+y = \alpha_0 + \gamma_1 \tilde{x_1} + \ldots + \gamma_{k} \tilde{x_k}  + \varepsilon \qquad E (\varepsilon|x)  = 0
+\, ,
+\]
+where 
+\[
+\tilde{x} = \frac{x-E(x)}{\sigma_x}
+\, .
+\]
+Now $\gamma_j$ is the ceteris paribus marginal of $\tilde{x}_j$ on $y$.  That is, *when  $\tilde{x}_j$ increases by one standard deviation, $y$ increases by $\gamma_j$ units.* 
+
+To estimate this model, we only have use the *center* and *scale* options to have this done on all regressors in the  OLS. 
+
+```{r}
+summ(reglin, 
+     center = TRUE,
+     scale = TRUE)$coeftable %>%
+  kable(digits=3) %>%
+  kable_styling()
+```
+The $R^2$ for this model is `r  summary(reglin)$adj.r.squared`
+
+
+### Visual regression
+
+Now that all variables are scaled (without units), we can **visually** compare the coefficients attached to each regressor and see which coefficient is significant. 
+
+
+```{r visualreg}
+
+plot_summs(reglin, scale = TRUE,
+           plot.distributions = FALSE  )
+```
+
+
+## Collinearity
+It is always a good habit to explore the correlation between the numerical variables in the data. This can give some insight to detect potential redundancies in the model.
+
+In the case of a linear model, we'd like to avoid to have highly correlated regressors because
+
++ redundant predictors add more complexity than information
++ using highly correlated predictors result in unstable estimation and worse predictability
+
+
+### Exploring Correlations
+
+```{r simplecorrelation}
+library(ggcorrplot)
+myvars <- BankAccount[,c("Trans", "HighTrans", "Checks", "Years", "Salary")]
+# Compute a correlation matrix
+corr_matrix<-cor(myvars)
+# Visualize the lower triangle of the correlation matrix
+ggcorrplot(corr_matrix, hc.order = FALSE, lab= "true",
+                         type = "lower", outline.col = "white")
+```
+
+
+### Variance Inflation Factor 
+
+Is a measure of multicollinearity between variables. It indicates by how much the variance of the coefficient of $x_j$ is inflated due to the presence of other regressors. The VIF for regressor $x_j$ is calculated by 
+- running a regression of $x_j$ on all other regressors
+- computing
+\[
+VIF_j
+ = \frac{1}{1 - R^2_j}
+\, .
+\]
+
+- $VIF = 1$ indicates no collinearity
+- A VIF larger than 10 (sometimes 5) is considered large
+
+```{r }
+summ(reglin,
+     center = TRUE,
+     scale = TRUE, 
+     vifs = TRUE)$coeftable %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+### Solutions to Multicollinearity
+
+- Create new variables from the ones that are collinear, see e.g. Principal Components Analysis or Partial Least Squares (see the ISLR book for more on these).
+- Take out some variables.
+
+Let us try by removing the variable *Trans* from the model: 
+
+```{r visualreg2 }
+# New linear regression model
+reglin2 <- lm(Salary ~  HighTrans+ Checks + Years, data = BankAccount)
+
+# Table 
+summ(reglin2, center = TRUE, scale = TRUE, vifs = TRUE)$coeftable %>%
+  kable(digits=2) %>%
+  kable_styling()
+
+plot_summs(reglin2, scale = TRUE)
+```
+
+In our example, omitting *Trans* (the Nb of transactions in 2020) does not change the fit of the model (adjusted $R^2$ was `r  round(summary(reglin)$adj.r.squared, 3)` and is now  `r  round(summary(reglin2)$adj.r.squared, 3)`), nor the coefficients of the regressors not correlated with Trans. But the VIFs are now all small.
+
+>In conclusion, removing one variable (*Trans*) has reduced the VIFs on all other variables without affecting the model 
+
+## Illustration on  the complete model.
+Let's now look at the complete model and on the correlation between all variables
+
+
+```{r fullcorrelation}
+# We compute the correlation matrix of all the numerical variables
+corr_coef<-cor(BankAccount[,-c(7,14,15,19)],use = "p")
+#And then plot it with nice options 
+ggcorrplot(corr_coef, 
+           type = "lower",         # lower triangle of the matrix only
+           hc.order = FALSE,        # variable sorted from highest to lowest
+           outline.col = "white",  #Color options
+           lab = TRUE, 
+           lab_size = 2) +
+  ggtitle("Correlation between all numerical variables")
+```
+
+> What can be said from this heatmap? 
+
+We can see that a lot of regressors are highly correlated, and so a selection of regressors is probably needed if one want our model to perform well. This is confirm when looking at the VIFs in the results of the regression on all variables.  
+
+```{r}
+reglincomplete <- lm(Salary ~., data= BankAccount)
+summ(reglincomplete, center = TRUE, scale = TRUE, 
+     vifs = TRUE)$coeftable %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+We see here that we also have lots of large VIF, in accordance with what the correlations heatmap. Usually, what we'll like to do in such a case is:
+
++ determine which predictors are highly correlated, say A and B
++ choose  between A and B  the one that is *less* correlated on average with other predictors and remove it
++ repeat until all correlations are below a threshold, e.g. 75%
+
+
+This is usually more difficult in practice.
+
+
+> Which variables would you keep and which variables would you discard in the analysis? 
+
+
+
+# Selection of Regressors using Old (but Still Alive) Methods
+
+It is a known fact in the Bank that there is nonlinearity of Salary with the number of years a household has spent in the bank, so  we will add some polynomial terms in Years to our data frame. When doing this, it is good practice to center the variable before taking powers to avoid multicollinearity.
+
+```{r}
+meanYears <- mean(BankAccount$Years)
+Years2 <- (BankAccount$Years - meanYears)^2
+Years3 <- (BankAccount$Years - meanYears)^3
+MyBankAccount <- data.frame(BankAccount, Years2, Years3)
+```
+
+
+## Stepwise Methods
+
+Using the *leaps* package we can perform an automatic variable selection such as **forward selection**, **backward elimination**, or **exhaustive search** to find a better model.
+Here we will not use cross validation at first since stepwise regression has $2^k$ candidate models where $k$ is the number of explanatory variables. 
+Meaning with 19 explanatory variables we have **524288** candidate models even without cross validating the results. 
+
+So we will first try to find the optimal number of variables to be used before cross validating the resulting model from the automatic variable selection. There are basically 3 traditional methods: 
+
+
+  +  Forward selection: starts with the constant term and adds one  variable at a time, that yields the largest decrease in RSS (Residual Sum of Squares).^[ Remember the Residual Sum of Squares is: $$ RSS= \sum_{i=1}^n (y_i - \widehat{f}(x_i))^2 $$ .]
+Since the F statistic for a newly included variable is based on the relative decrease in RSS that the addition of a variable causes, the largest decrease in RSS is obtained for the variable whose inclusion yield the "most significant" F-test.
+
+  +  Backward elimination: starts with the general model and
+eliminates one variable at a time, that yields the smallest decrease in RSS.
+Same kind comment here: smallest decrease in RSS is for the least significant variable.
+
+  + Stepwise selection, or Efroymsom's procedure^[Efroymson,M. A. (1960) "Multiple regression analysis," Mathematical Methods for Digital Computers, Ralston A. and Wilf,H. S., (eds.), Wiley, New York.]: forward selection, where at each step the  possibility of deleting a variable as in backward elimination is  considered, based on a t/F test.
+
+Nothing unfortunately ensures that the "optimal"  subset, or even the relevant variables, will be selected by mean of one of these methods.
+We also have the problem of multiple testing: if the probability of
+Type-I error is 5\% for one test, when we do $m$ tests it can be up to $m$ times this probability  (not accouting for the correlation between tests statistics). 
+
+We will use *caret* as a device to call functions in *leaps*.
+Caret main function is *train*.  Here we use the extra argument *preProcess* to center and scale our regressors. To reduce the computational  burden we restrict our choice to **8** variables in the final regression.
+
+```{r}
+nv <- 8
+trctrl <- trainControl(method = "none") 
+leapF <- train(Salary ~., data = MyBankAccount, 
+               method = "leapForward",
+               trControl = trctrl, 
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(nvmax = nv))
+
+coef(leapF$finalModel,leapF$bestTune$nvmax) %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+The result is the best model with 8 regressors obtained by forward selection. Note that it is not the same set that is obtained from backward selection.
+
+
+```{r}
+nv <- 8
+trctrl <- trainControl(method = "none") 
+leapB <- train(Salary ~., data = MyBankAccount, 
+               method = "leapBackward",
+               trControl = trctrl, 
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(nvmax = nv))
+
+coef(leapB$finalModel,leapB$bestTune$nvmax) %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+On this graphic, each horizontal row represent a model.  One then have a visual summary of the variables used (black square) in various models and its impact on the adjusted $R^2$ (or other criterion, described later). The top row shows the variable used in the selected model. 
+
+```{r visualLeapFwd}
+regfit.fwd = regsubsets(Salary~., 
+                        method = "forward",
+                        data = MyBankAccount)
+
+
+plot(regfit.fwd , scale ="adjr2", 
+     main = "Forward selection variables ", 
+     )
+```
+
+
+```{r visualLeapBwd}
+regfit.bwd = regsubsets(Salary~.,
+                        method = "backward",
+                        data = MyBankAccount)
+
+plot(regfit.bwd , scale ="adjr2", 
+     main = "Backward selection variables "
+     )
+
+```
+
+
+##  Criterions for finding the right number of variables
+
+
+Let's write the linear model in matrix form
+\[
+ y = X \beta + \varepsilon,
+\]
+where
+
+  + $y$ is the $n\times 1$ vector of observations
+  + $X$ is the $n\times (k+1)$ matrix of rank $k+1$ containing regressors including the constant term
+  + $\varepsilon$ denote a general $n\times 1$ vector of i.i.d. errors with variance  $\sigma^{2}$
+
+Consider now a partition of $X$ in $X_p$ and $X_r$ with dimension $p+1$ ($p$ regressors plus the intercept) and $r$ $(=k-p-1)$ regressors respectively. 
+We are looking for models of the general form
+\[
+ y = X_p \beta_p + \varepsilon
+ \, .
+\]
+The dimension $p+1$ may vary along different approximating models, and there may also exists many approximating models with $p+1$ regressors from $k+1$, but we will use this generic form and called such a model a **p-model**.
+
+Each p-model considers only $p+1$ regressors and
+is estimated by OLS and we thus obtain $\widehat {\beta}_p$.
+The reason for introducing this notation is to make explicit that we may consider in turn different sets of potential useful regressors.
+
+>**We do not know exactly which p-model is true.**
+
+### MSEP for Selecting Regressors
+
+Based on a p-model, we will predict them $y_{new}$ by 
+$X_p\widehat{\beta}_p$, so the *Mean Squared Error of Prediction* is 
+\[
+MSEP = n^{-1} E \| y_{new} - X_p\widehat{\beta}_p\|^2
+\, ,
+\]
+where the expectation is conditional on $X$.
+
+**A bit of theory can help**
+
+We can decompose MSEP as: 
+\[
+MSEP = n^{-1} \left\{ E \| y_{new} - X{\beta}\|^2
++
+E \| X{\beta} - X_p\widehat{\beta}_p\|^2
+\right\}
+=
+\sigma^2  + 
+n^{-1} E \| X{\beta} - X_p\widehat{\beta}_p\|^2
+\, .
+\]
+Indeed
+\[
+E ( y_{new} - X{\beta})'
+(X_p \widehat{\beta_p} - X\beta) = 
+E \, \varepsilon_{new}' \, (X_p \widehat{\beta_p} - X\beta) 
+= 0
+\, ,
+\]
+as $\varepsilon_{new}$ is independent of the original sample.
+
+
+We can decompose the last term as
+\[
+n^{-1} 
+\left\{
+E \| X_p \widehat{\beta_p} - X_p\beta_p\|^2 
++
+E \| X_p {\beta_p} - X\beta\|^2 
+\right\}
+\]
+where $\beta_p = E \widehat{\beta_p}$.
+This is because
+\[
+E ( X_p \widehat{\beta_p} - X_p\beta_p)'
+( X_p {\beta_p} - X\beta) = 0
+\, .
+\]
+The first term is a variance term, the second one a squared bias term. It is easy to see that
+
++ $\widehat{\beta}_p=(X_p'X_p)^{-1}X_p'y$
++ $X_p\beta_p = X_p E \widehat{\beta}_p  = X_p (X_p'X_p)^{-1}X_p' X \beta  =  P_p X\beta$, where $P_p=X_p(X_p'X_p)^{-1}X_p'$ is the projection matrix on the subspace spanned by $X_p$.
++ $X\beta-X_p\beta_p = M_p X\beta$, where $M_p = I -P_p$
++ $X_p\widehat{\beta}_p - X_p\beta_p  = P_p (y - X\beta) =  P_p \varepsilon$.
++ $E \|X_p\widehat{\beta}_p - X_p\beta_p\|^2 = E  \ \varepsilon' P_p \varepsilon = \sigma^2 (p+1).$ 
+
+Hence
+\[
+MSEP =  (1+(p+1)/n) \sigma^{2} + (1/n) \beta'X' M_p X\beta 
+\, .
+\]
+
+### Mallows' $C_p$ criterion
+
+Mallows^[Mallows, C. L. (1973). "Some Comments on CP". Technometrics. 15 (4): 661–675. doi:10.2307/1267380] assumes that the complete model is correctly specified (still some of the coefficients may be zero). Under this assumption, the residual sum of squares for the complete model is such that
+\[
+E(RSS_k)= E(y'M_k y) = (n-k-1) \sigma^{2}
+\, .
+\]
+The residual sum of squares for the p-model is such that
+\[
+E(RSS_p)= E(y'M_p y)  = {\beta}' X' M_p X\beta + (n-p-1)\sigma^{2}
+\, .
+\]
+Hence
+\[
+C_p = \frac{RSS_p}{n}  + \frac{2(p+1)}{n} \frac{RSS_k}{n-k-1}
+\]
+is an unbiased estimator for MSEP.
+
+### Akaike Information Criterion ($AIC$)
+
+One can show that the **Akaike information criterion (AIC)**
+for linear regression is
+\[
+AIC \propto C_p
+\, .
+\]
+Since only the rankings of model is important, using AIC gives us the same raking than $C_p$.
+
+### Bayesian  Information Criterion ($BIC$)
+\[
+BIC \propto \frac{RSS_p}{n}  + \frac{(p+1) \log n}{n} \frac{RSS_k}{n-k-1}
+\]
+BIC penalizes large number of regressors more than AIC/$C_p$. 
+
+
+## Comparing the solutions
+
+The library *leaps* allows an exhaustive search of all possible subsets of regressors (which should not take too long if you don't have too many regressors!).
+We can then look for the best subset for different criterion.
+
+### Solution proposed using $C_p$ 
+
+```{r LeapsCp, echo=TRUE, include=TRUE}
+regfit.full <- regsubsets(Salary~.,
+                          data = MyBankAccount, nvmax = 21)
+reg.summary <- summary(regfit.full)
+# Look at names(reg.summary) to see which criterion are returned
+
+plot(reg.summary$cp,
+     xlab="Number of Variables",
+     ylab="Cp",type='l', lwd=2,
+     col = SIAP.color,
+     xlim= c(0,20),
+     frame.plot = FALSE)
+
+# Adding minimum point
+ind.Cp <- which.min(reg.summary$cp)
+points(ind.Cp,reg.summary$cp[ind.Cp],col="red",cex=2,pch=20)
+
+```
+
+Using the $C_p$ criterion one would select only *`r ind.Cp`* regressors.  You can look at the list of variables included in the model selected by $C_p$. 
+
+```{r}
+xnames <- which(reg.summary$which[which.min(reg.summary$cp),])
+f.Cp <- as.formula(paste("Salary","~",paste(names(xnames)[-1], collapse="+")))
+# f.Cp
+```
+
+Here is what we obtain for the final $C_p$ model:
+
+**`r paste(f.Cp[2],f.Cp[3],sep='~')`**
+
+```{r}
+names(xnames)[6] <- "Category"
+f.Cp <- as.formula(paste("Salary","~",paste(names(xnames)[-1], collapse="+")))
+reglin.Cp <- lm(f.Cp, data= MyBankAccount)
+summ(reglin.Cp, center = TRUE, scale = TRUE, 
+     vifs = TRUE)$coeftable %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+```{r VisualRegCp}
+plot_summs(reglin.Cp, scale = TRUE)
+```
+
+
+### Solution proposed using $BIC$ 
+
+Here again, we can search and plot the BIC for different numbers of regressors
+
+```{r LeapsBIC}
+plot(reg.summary$bic,
+     xlab="Number of Variables",
+     ylab="BIC",type='l', lwd=2,
+     col = SIAP.color, 
+     xlim= c(0,20),
+     frame.plot = FALSE)
+
+# adding minimum point
+ind.BIC <- which.min(reg.summary$bic)
+points(ind.BIC,reg.summary$bic[ind.BIC],col="red",cex=2,pch=20)
+```
+
+
+```{r}
+xnames.BIC <- which(reg.summary$which[which.min(reg.summary$bic),])
+f.BIC <- as.formula(paste("Salary","~",paste(names(xnames.BIC)[-1], collapse="+")))
+#f.BIC
+```
+
+The $C_p$ criterion  would select only *`r ind.BIC`* regressors. Here is what we obtain for the final $BIC$ model:
+
+**`r paste(f.BIC[2],f.BIC[3], sep='~')`**
+
+```{r}
+#names(xnames)[6] <- "Category"
+f.BIC <- as.formula(paste("Salary","~",paste(names(xnames.BIC)[-1], collapse="+")))
+reglin.BIC <- lm(f.BIC, data= MyBankAccount)
+summ(reglin.BIC, center = TRUE, scale = TRUE, 
+     vifs = TRUE)$coeftable %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+```{r VisualRegBIC}
+plot_summs(reglin.BIC, scale = TRUE)
+```
+
+
+## Cross Validation
+
+In practice, we can apply any cross validation methods we know to estimate MSEP and select the "best" model.
+
+
+```{r Setseeds, echo=FALSE}
+# function to set up random seeds
+setSeeds <- function(method = "cv", 
+                     numbers = 1, repeats = 1, 
+                     tunes = NULL, seed = 123) 
+  {
+#B is the number of resamples and integer vector 
+# of M (numbers + tune length if any)
+  B <- if (method == "cv") numbers
+  else if(method == "repeatedcv") numbers * repeats
+  else NULL
+  
+  if(is.null(length)) {
+    seeds <- NULL
+  } else {
+    set.seed(seed = seed)
+    seeds <- vector(mode = "list", length = B)
+    seeds <- 
+      lapply(seeds, function(x) 
+        sample.int(n = 1000000, 
+                   size = numbers + ifelse(is.null(tunes), 
+                                           0, tunes)))
+    seeds[[length(seeds) + 1]] <- 
+      sample.int(n = 1000000, size = 1)
+  }
+  # return seeds
+  seeds
+}
+```
+
+
+
+```{r}
+library(parallel)
+library(doParallel)
+```
+
+#### Benchmarking
+
+Cross-validation can be used to evaluate the "fit" of a single model. This is useful to know whether our more elaborate methods yield some improvements.
+
+For instance, we  can evaluate the MSEP for the linear model that includes all regressors using cross-validation.
+
+```{r}
+# control variables
+numbers <- 5
+repeats <- 20
+rcvTunes <- 1 # tune number of models
+seed <- 123
+# repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                     numbers = numbers, repeats = repeats, 
+                     tunes = rcvTunes, seed = seed)
+
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+
+# Train control 
+rcvControl <- trainControl(method = "repeatedcv", 
+                        number = numbers, repeats = repeats,
+                        seeds = rcvSeeds)
+set.seed(123)
+lm <- train(Salary ~., data = MyBankAccount, 
+               method = "lm",
+               trControl = rcvControl, 
+               preProcess = c("center","scale"))
+stopCluster(cl)
+boxplot(lm$resample$RMSE, main="Model using all regressors", 
+        ylab = "RMSE",
+        col='#ffffcc',ylim = range(0:1),  frame.plot = FALSE)
+```
+
+Alternatively, we could look at the performances of the model selected by $C_p$. 
+
+```{r}
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+
+set.seed(123)
+lmcp <- train(f.Cp, data = MyBankAccount, method = "lm",
+            trControl = rcvControl, 
+            preProcess = c("center","scale"))
+stopCluster(cl)
+boxplot(lmcp$resample$RMSE, 
+        main= "Model using regressors selected by Cp", 
+        ylab = "RMSE",
+        col='#b3cde3',ylim = range(0:1),  frame.plot = FALSE)
+```
+And the model selected by $BIC$. 
+
+```{r}
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+
+set.seed(123)
+lmBIC <- train(f.BIC, data = MyBankAccount, method = "lm",
+            trControl = rcvControl, 
+            preProcess = c("center","scale"))
+stopCluster(cl)
+boxplot(lmBIC$resample$RMSE, 
+        main= "Model using regressors selected by BIC", 
+        ylab = "RMSE",
+        col='pink',ylim = range(0:1),  frame.plot = FALSE)
+```
+
+#### Forward Selection
+
+Here we will use CV to select the number of variables in the model.
+
+```{r LeapFwithcaret}
+# control variables
+numbers <- 5
+repeats <- 20
+rcvTunes <- 12 # tune number of models
+seed <- 123
+# repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                     numbers = numbers, repeats = repeats, 
+                     tunes = rcvTunes, seed = seed)
+
+# Train control 
+rcvControl <- trainControl(method = "repeatedcv", 
+                        number = numbers, repeats = repeats,
+                        seeds = rcvSeeds)
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+
+set.seed(123)
+leapF <- train(Salary ~., data = MyBankAccount, 
+               method = "leapForward",
+               trControl = rcvControl, 
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(nvmax = 1:12))
+stopCluster(cl)
+```
+
+
+```{r LeapFPlot}
+ggplot(leapF)+
+  ggtitle("Forward Selection") +
+  theme_minimal()
+
+#Regression results
+coef(leapF$finalModel,leapF$bestTune$nvmax) %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+#### Backward Selection
+
+```{r LeapBwithcaret}
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+set.seed(123)
+leapB <- train(Salary ~., data = MyBankAccount, 
+               method = "leapBackward",
+               trControl = rcvControl, 
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(nvmax = 1:12))
+stopCluster(cl)
+```
+
+
+```{r LeapBPlot}
+ggplot(leapB)+
+  ggtitle("Backward Selection") +
+  theme_minimal()
+
+# Regression results
+coef(leapB$finalModel,leapB$bestTune$nvmax)  %>%
+  kable(digits=2) %>%
+  kable_styling()
+```
+
+
+#### Stepwise Selection
+
+```{r LeapSwithcaret}
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+set.seed(123)
+leapS <- train(Salary ~., data = MyBankAccount, 
+               method = "leapSeq",
+               trControl = rcvControl,
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(nvmax = 1:12))
+stopCluster(cl)
+```
+
+
+
+```{r LeapSPlot}
+ggplot(leapS)+
+  ggtitle("Stepwise Selection") +
+  theme_minimal()
+
+# Regression results
+coef(leapS$finalModel,leapS$bestTune$nvmax)  %>%
+  kable(digits=2) %>%
+  kable_styling()       
+```
+
+
+**Remarks**
+
+- You can generate predictions from each model using the command *predict*.      
+- You can look at variable importance using *varImp*. For linear model, variable importance is proportional to the absolute value of the t statistic, something completely different from the measure we introduced above.
+
+> Compare the different sets of variables for each method.
+
+
+#### Comparison of Models
+
+```{r CVComparison, echo=TRUE, include=TRUE,cache=TRUE}
+models <- list(lm = lm, cp = lmcp, BIC = lmBIC,
+               forward = leapF, backward = leapB, 
+               stepwise = leapS)
+perf <- resamples(models)
+colvec <- colvec <- c('#ffffcc','#b3cde3', "pink", '#ccebc5','#decbe4','#fed9a6')
+boxplot(perf$values[c("lm~RMSE", "cp~RMSE", "BIC~RMSE",
+                      "forward~RMSE", "backward~RMSE", 
+                      "stepwise~RMSE")],
+        #names = names(models),
+        names = c("lm", "Cp", "BIC", "forwd", "backwd", "step"),
+        col=colvec,
+         ylab="RMSE",
+        frame.plot = FALSE)
+``` 
+
+
+Overall it seems that  the selection done using the $C_p$ is doing the best job!
+
+
+#### The Trouble with CV Selection
+
+One characteristic of CV stepwise selection is that for each K-fold, we may end up with a different subset of regressors, even if the "optimal" number of regressors is the same. Hence once one has chosen the number of regressors, it still remains to choose which set of regressors. 
+
+(It seems that) Caret uses a majority rule to select regressors and uses an extra K-fold CV to break up ties.
+
+
+# Penalization Methods
+
+Penalization methods can prevent the common problem of model complexity. When we have a model with many explanatory variables they tend to have large variances, especially so if there is correlation in the data. This will affect the reliability of the fitted model. If you recall the **bias and variance** tradeoff, we use **penalization** techniques to intentionally introduce **bias** in our model with the result of lowering the **variance**. 
+
+## Ridge Regression
+
+Ridge regression is typically used when there is almost multicollinearity among regressors. It also applies when $p \geq n$!  
+It is defined as the solution of the *penalized least-squares problem*
+
+\[
+\min_{\beta} \frac{1}{2n}
+\sum_{i=1}^{n}{ \left( y_i - \beta_0 - x'_i\beta\right)^{2} } +
+\lambda \frac{\| \beta\|^{2}}{2}
+\, .
+\]
+The ridge regression problem can be rewritten as
+\[
+\min_{\beta} \frac{1}{2n}
+\sum_{i=1}^{n}{ \left( y_i - \beta_0 - x'_i\beta\right)^{2} }
+\qquad \rm{such \ \ that } \quad
+\| \beta\| ^{2} \leq c
+\, .
+\]
+Hence $\lambda$ is the cost of the constraint.
+
+Ridge regression shrinks parameters towards zero and thus avoids too large parameters. It introduces some bias in estimation in order to reduce variance.
+We need to center and scale  each of the $x$: hence components of $\beta$ is relatively small (typically less than one) and comparabe. The solution is the ridge estimator
+\[
+\widehat{\beta} = \left( \frac{X'X}{n} + \lambda \, I \right)^{-1} \frac{X' y}{n}
+\]
+If we have almost multicollinearity, $X'X$ cannot be inverted, or is difficult to invert numerically because some eigenvalues are close to zero. When  $\lambda  > 0$, the matrix $X'X + \lambda I$ is invertible. This works even for $p  \geq n$, where $X'X$ cannot be inverted!
+
+Now $\lambda$ becomes the parameter that we should choose by some validation method. It is between 0 and 1, typically small, and we usually select it on the log scale.
+
+> Why is it important to center and scale variables before performing LASSO and Ridge regularization?
+
+Scaling ensures that that the coefficient of the regression are comparable. This ensures that the penalty term penalizes each coefficient equally, independently of the units of the corresponding variable.
+  
+  
+```{r Ridge}
+# Control variables
+numbers <- 5
+repeats <- 20
+rcvTunes <- 10 # tune number of models
+seed <- 123
+# repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                     numbers = numbers, repeats = repeats, 
+                     tunes = rcvTunes, seed = seed)
+
+
+# Controls for the CV 
+rcvControl <- trainControl(method = "repeatedcv", 
+                        number = numbers, repeats = repeats,
+                        seeds = rcvSeeds)
+
+# Parallel computing initialization 
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+
+set.seed(123)
+lambda <- 10^(-seq(1.8, 0.9, length = rcvTunes))
+set.seed(123)
+ridge <- train(Salary ~., data = MyBankAccount, 
+               method = "glmnet",
+               trControl = rcvControl, 
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(alpha = 0, 
+                                      lambda = lambda))
+stopCluster(cl)
+```
+
+
+```{r RidgePlot}
+ggplot(ridge) +
+  ggtitle("Ridge Penalization") +
+  labs(x = "Regularization parameter (Lambda)")+
+  theme_minimal() 
+
+cbind( ridge$bestTune$lambda,
+          -log(ridge$bestTune$lambda)/log(10)) %>% 
+  kable(digits=3, col.names = c("lambda (exp)", "lambda (true)")) %>%
+  kable_styling()
+```
+
+**Note** The method select lambda, and the model is estimated with the optimal lambda using the whole dataset.
+
+ 
+```{r}
+# All the models are in ridge$finalModel 
+# We present the one corresponding to the optimal lambda 
+coef(ridge$finalModel,ridge$bestTune$lambda) 
+```
+
+
+```{r ridgeVIFplot}
+ggplot(varImp(ridge))+
+  ggtitle("VIF (Ridge Penalization)") +
+  theme_minimal() 
+ 
+```
+
+
+## Least Absolute Shrinkage and Selection Operator (LASSO)
+
+A very common form of regularization in machine learning is **LASSO**. It is commonly referred to as **L1 regularization**. The **LASSO** regularization shrinks unnecessary parameters estimates to 0 to simplify the model:
+Lasso is defined as the solution of the penalized least-squares problem
+\[
+\min_{\beta} \frac{1}{2n}
+\sum_{i=1}^{n}{ \left( y_i - \beta_0 - x'_i\beta\right)^{2} } +
+\lambda |\beta|
+\qquad 
+|\beta| = \sum_{j=1}^k |\beta_j| \, .
+\]
+The lasso problem can be rewritten as
+\[
+\min_{\beta} \frac{1}{2n}
+\sum_{i=1}^{n}{ \left( y_i - \beta_0 - x'_i\beta\right)^{2} }
+\qquad \rm{such \ \ that } \quad
+ |\beta| \leq c
+\, .
+\]
+Hence $\lambda$ is the cost of the constraint.
+
++ If $\lambda  = 0$, we obtain OLS. If $\lambda = \infty$, all
+  parameters are zero.
++ Lasso regression shrinks parameters towards zero more than ridge does.
++ It can be shown that if $\lambda$ is large enough, the solution put some parameters to zero: Lasso does automatic *variable selection*.
++ One should *center* and *scale* each component of $x$. 
++ $\lambda$ becomes the parameter to choose.
+
+
+```{r Lasso}
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+
+lambda <- 10^(-seq(2.5, 1.6, length = rcvTunes))
+
+set.seed(123)
+lasso <- train(Salary ~., data = MyBankAccount, 
+               method = "glmnet",
+               trControl = rcvControl, 
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(alpha = 1, 
+                                      lambda = lambda))
+stopCluster(cl)
+```
+
+
+```{r LassoPlot}
+ggplot(lasso)   +
+  ggtitle("Lasso Penalization") +
+  labs(x = "Regularization parameter (Lambda)")+
+  theme_minimal()
+
+cbind(lasso$bestTune$lambda,
+        -log(lasso$bestTune$lambda)/log(10))  %>% 
+  kable(digits=3, col.names = c("lambda (exp)", "lambda (true)")) %>%
+  kable_styling()
+```
+
+
+```{r}
+coef(lasso$finalModel,lasso$bestTune$lambda) 
+```
+
+
+```{r lassoVIFplot}
+ggplot(varImp(lasso)) +
+  ggtitle("VIF (Lasso Penalization)") +
+  theme_minimal() 
+```
+
+
+> What is the difference between how a model is regularized when using LASSO compared to Ridge? When do you want to use which form of regularization? 
+
+
+**Ridge** regularization shrinks estimated coefficients towards 0. This can be useful when most parameters in the model have an impact on the target variable.  
+
+**Lasso** shrinks less important features to 0, which will end up being a way of performing *variable selection*. The **LASSO** approach is useful when only a handful of the variables are actually important in the fitted model. 
+
+
+
+## Elastic Net
+
+It is defined as the solution of the penalized  least-squares problem
+\[
+\min_{\beta} \frac{1}{2n}
+\sum_{i=1}^{n}{ \left( y_i - \beta_0 - x'_i\beta\right)^{2} } +
+\lambda \left( (1-\alpha) \frac{ \|\beta\|^2}{2}  + \alpha |\beta| \right)
+\, .
+\]
+
++ Where $\lambda$ and $\alpha$ are two *hyper parameters* to determine through Cross Validation: . 
+
+*Elastic Net* combines, through $\alpha$, feature elimination from Lasso and feature coefficient reduction from the Ridge model to improve  model predictions. If $\alpha=1$ we have the Lasso estimator, if  $\alpha=0$,  the Ridge regression.
+  
+```{r Enet}
+# control variables
+rcvTunes <- 110 # tune number of models
+seed <- 123
+# repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                     numbers = numbers, repeats = repeats, 
+                     tunes = rcvTunes, seed = seed)
+
+# Train control 
+rcvControl <- trainControl(method = "repeatedcv", 
+                        number = numbers, repeats = repeats,
+                        seeds = rcvSeeds)
+
+
+nrcore <- 5
+cl <- makeCluster(mc <- getOption("cl.cores", nrcore))
+registerDoParallel(cl)
+
+alpha <- seq(0,1, length=11)
+lambda <- round(10^(-seq(2.5, 1.6, length = 10)), 4)
+
+set.seed(123)
+enet <- train(Salary ~., data = MyBankAccount, 
+               method = "glmnet",
+               trControl = rcvControl, 
+               preProcess = c("center","scale"),
+               tuneGrid = expand.grid(alpha = alpha, 
+                                      lambda = lambda))
+stopCluster(cl)
+```
+
+
+Since we have 2 parameter, the search is a little bit more complex and is done on a 2D grid. We restrict our grid search to a few values for $\lambda$ ( `r length(lambda)` values $\in$ [`r min(lambda)` , `r max(lambda)`] ) and $\alpha$ (`r length(alpha) ` values $\in$ [`r min(alpha)` , `r max(alpha)`]  ).
+
+```{r EnetPlot}
+# capturing the results in a dataframe
+enet.res <- as.data.frame(cbind(lambda=enet$result$lambda, RMSE= enet$result$RMSE, alpha= enet$result$alpha ))
+enet.res$alpha <- as.factor(enet.res$alpha)
+
+# Plotting the results
+ggplot(enet.res) +
+ aes(x = lambda, y = RMSE, colour = alpha, group = alpha) +
+ geom_line(size = 0.6) +
+  geom_point()+
+ labs(x = "Regularization parameter (Lambda)", 
+      y = "RMSE (Repeated Cross Validation) ", 
+      color = "Mixing Parameter (Alpha)")+
+ scale_color_viridis_d(option = "plasma", direction = -1) +
+ theme_minimal() +
+ theme(legend.position = "top")
+
+
+```
+
+
+```{r }
+
+param.enet <- cbind( enet$bestTune$alpha,
+          enet$bestTune$lambda,
+          -log(enet$bestTune$lambda)/log(10))
+
+# param.enet %>% 
+#   kable(digits=4, col.names = c("alpha", "lambda (exp)", "lambda (true)")) %>%
+#   kable_styling()
+```
+
+The optimal values are: 
+
+* $\alpha^* =$ `r enet$bestTune$alpha`  (*dark blue line*)
+* $\lambda^*  =$ `r enet$bestTune$alpha`
+And so since $\alpha=1$, the elastic net estimator summarizes to a Lasso estimator with exactly the same value for $\lambda$. 
+
+> The elastic net *encompass* both Ridge and Lasso estimators, at a cost of a more intensive search procedure with a 2D grid
+
+```{r}
+coef(enet$finalModel,enet$bestTune$lambda) 
+```
+
+
+```{r enetVIFplot}
+ggplot(varImp(enet)) +
+  ggtitle("VIF (Elastic Net Penalization)") +
+  theme_minimal() 
+```
+
+## Comparison of Models
+It is now time to compare the models and to select the best one, in terms of lowest RMSE, for all Cross Validated samples. 
+
+```{r FinalComparison}
+models <- list( lm = lm, cp = lmcp, forward = leapF, 
+                backward = leapB, stepwise = leapS, 
+                ridge = ridge, lasso = lasso)
+perf <- resamples(models)
+colvec <- c('#fbb4ae','#b3cde3','#ccebc5','#decbe4','#fed9a6','#ffffcc', SIAP.color)
+boxplot(perf$values[c("lm~RMSE", "cp~RMSE", 
+                      "forward~RMSE", "backward~RMSE", 
+                      "stepwise~RMSE", "ridge~RMSE", "lasso~RMSE")],
+        #names = names(models),
+        names = c("lm", "Cp", "forwd", "backwd", "step", "ridge", "lasso"),
+        col=colvec,horizontal = FALSE,
+        ylab="RMSE",
+        frame.plot = FALSE)
+``` 
+
+Lasso is good. $C_p$ is doing almost the same job with less variables. 
+
+# Wrap-up
+
+- In linear regression, scaling allows to compare coefficients and to measure variable importance.
+- Multicollinearity should be investigated beforehand. 
+- Mallows $C_p$ is a simple method to select regressors
+- Stepwise methods with CV have **two** drawbacks: 
+  - they do not necessarily select the "best" model and 
+  - the choice of variables can be sensitive to the number of repetitions.
+- Variable selection/elimination is done variable by variable (no interactions)    
+- Penalized least-squares methods can be used with multicollinearity or with a large number of regressors.
+- Preliminary analysis should help decide whether we want to transform some of the regressors, e.g. to account for nonlinearities.
+
+***
+# Corresponding functions if you use Python
+
+- *pandas* and *numpy* both offer great functions for handling your data.
+- The package *sklearn* has functions to both fit the model both with and without penalization using *sklearn.linear_model* with functions like:             
+  - *linear_model.LinearRegression()*,
+  - *linear_model.Ridge()*,
+  - *linear_model.Lasso()* and 
+  - *linear_model.ElasticNet()*. 
+  
+Another alternative to this is *statsmodels*, which has an *OLS()* function that provides a lot of information and evaluation criterions like AIC, BIC etc. when you use the summary function on the fitted model. However, to the best of our knowledge there is no big library for automatic variable selection in Python. 
+- *Sklearn* also has a model_selection library which provides function for computing cross validated metrics, using the function *cross_val_score()*
+- *matplotlib* has good visualizations for your data and feature importance. 
+
+
+
+  
+
+
+
+
+
+
+
+
+
+
+

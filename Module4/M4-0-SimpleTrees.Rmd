@@ -1,0 +1,383 @@
+---
+title: "Simple Trees"
+subtitle: "Some concepts"
+author: 
+- Christophe Bontemps & Patrick Jonsson - SIAP
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+    extra_dependencies: ["float"]
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               fig.pos = "!H", fig.align = "center",
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+```
+
+`r if(knitr:::pandoc_to() == "latex") {paste("\\large")}` 
+
+
+```{r Libraries, echo=FALSE}
+
+# Data management
+library(dplyr)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+
+# Statistical data sets
+library(ISLR)
+library(AppliedPredictiveModeling)
+
+# Nice tables
+library(xtable)
+library(kableExtra)
+
+# Decision tree
+library(caret)
+library(rpart)
+library(visNetwork)
+
+# build-in color palette
+library(RColorBrewer)
+library(Polychrome) 
+
+```
+
+
+
+
+
+
+```{r data}
+data(twoClassData)
+names(predictors) <- c("Education", "Income")
+levels(classes)[levels(classes)=="Class1"] <- "Urban"
+levels(classes)[levels(classes)=="Class2"] <-  "Rural"
+twoClass <- data.frame(predictors,classes)
+#twoClass$classes <- relevel(twoClass$classes, ref="Urban")
+
+twoClassColor <- brewer.pal(3,'Set2')[2:1]
+names(twoClassColor) <- c('Urban','Rural')
+Ruralcolor <- brewer.pal(3,'Set2')[1:1]
+Urbancolor <- brewer.pal(3,'Set2')[2:2]
+```
+
+
+```{r summary}
+summary(twoClass$classes)
+```
+
+Note that we have defined *Urban* as being the first class, but we may want to change this along the way.
+
+```{r bivariatefig}
+ggplot(data = twoClass,aes(x = Education, y = Income)) + 
+  geom_point(aes(color = classes), size = 1, alpha = .6) +
+  scale_colour_manual(name = 'classes', 
+                      values = twoClassColor) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0))+
+  theme_minimal()
+```
+
+
+```{r vistree}
+tree_fit <- rpart(classes~., data= twoClass, control = rpart::rpart.control(cp = 0.001))
+
+Predictions <- predict(tree_fit, twoClass, type="class")
+      
+# confmat <- confusionMatrix(table(predicted = Predictions, Actual = twoClass$classes) )
+# confmat$table
+
+visTree(tree_fit, digits = 2, main = "Complete Decision tree")
+
+```
+
+
+
+
+```{r}
+## Testing 
+cp.input <- 0.01
+maxdepth.input <- 5
+tree_fit <- rpart(classes~., data= twoClass, 
+                  control = rpart::rpart.control(cp = cp.input, 
+                                                 maxdepth = maxdepth.input))
+
+visTree(tree_fit, digits = 2, 
+        main = paste("Decision tree with a depth of ", maxdepth.input, "" ))
+
+```
+
+
+Using *rpart* package one has a nice representation of the tree where
+Each node shows:
+- the predicted class (Urban or Rural),
+- the predicted probability of survival,
+- the percentage of observations in the node
+
+```{r rparttree}
+# Other option
+library(rpart.plot)
+
+rpart.plot(tree_fit, 
+           main = paste("Decision tree with a max depth of ", maxdepth.input, "" ),
+           type = 4,
+           under = TRUE, box.palette = c(Urbancolor, Ruralcolor),
+           clip.right.labs = FALSE, branch = .3)
+```
+On can also 
+
+```{r rules}
+rules <- rpart.rules(tree_fit)
+
+kable(rules[,3:ncol(rules)]) 
+```
+
+One can then compute a step by step decription of the tree generated here
+
+
+```{r Step0}
+# Working with rules
+myrules <- apply(rules, 2, function(x) gsub(",", "", gsub("([a-zA-Z]),", "\\1 ", x)))
+
+#Original scatter plot
+
+p <- ggplot(data = twoClass,aes(x = Education, y = Income)) + 
+  geom_point(aes(color = classes), size = 1, alpha = .5) +
+  scale_colour_manual(name = 'classes', 
+                      values = twoClassColor) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0))+
+  theme_minimal()
+
+p + labs(title = "Position of Rural and Urban households in (Education, Income) space", 
+          subtitle = paste(nrow(twoClass), "observations")
+  )
+```
+
+
+```{r Step1}
+# First node 
+p1 <- p +annotate("segment", 
+                  x = min(twoClass$Education),
+                  xend = max(twoClass$Education),
+                  y = 0.2,
+                  yend = 0.2,
+                  size = 1.5,
+                  color = Ruralcolor ) +  
+  labs(title = "First node", 
+           subtitle = paste("Rule: ", gsub(",","",toString(myrules[5,2:6])))
+  )
+p1
+
+p1A <- p1 + annotate("rect", 
+               xmin= min(twoClass$Education),
+               xmax = max(twoClass$Education),
+               ymin = min(twoClass$Income),
+               ymax = 0.2,
+               fill = Ruralcolor, alpha = 0.2 )
+p1A 
+
+# Highlight Misclassified 
+misclassU <- twoClass %>%
+  filter((Income < 0.2 & classes == "Urban"))
+
+misclassR <- twoClass %>%
+  filter((Income > 0.2 & classes == "Rural"))
+         
+p1U <- p1A + geom_point(data = misclassU, 
+                 aes(x= Education, y = Income), 
+                 colour = Urbancolor, 
+                 size = 2)
+p1U
+
+p1R <-  p1U + geom_point(data = misclassR, 
+                 aes(x= Education, y = Income), 
+                 colour = Ruralcolor, 
+                 size = 2)
+p1R
+
+```
+
+
+```{r Step2}
+# Second node
+p2 <- p1A +annotate("segment", 
+                  x = 0.13,
+                  xend = 0.13,
+                  y = 0.2,
+                  yend = max(twoClass$Income),
+                  size = 1.5,
+                  color = Urbancolor )+
+   labs(title = "Second node:", 
+           subtitle = paste("Rule: ", gsub(",","",toString(myrules[4,2:13])))
+           )
+p2
+p2A <- p2 + annotate("rect", 
+              xmin= min(twoClass$Education),
+              xmax = 0.13,
+              ymin = 0.2,
+              ymax = max(twoClass$Income),
+              fill = Ruralcolor, alpha = 0.2 )
+p2A 
+
+
+# Highlight Misclassified 
+misclassU <- twoClass %>%
+  filter((Income > 0.2 & Education < 0.13 & classes == "Urban"))
+
+misclassR <- twoClass %>%
+  filter((Income > 0.2 & Education > 0.13 & classes == "Rural"))
+         
+p2U <- p2A + geom_point(data = misclassU, 
+                 aes(x= Education, y = Income), 
+                 colour = Urbancolor, 
+                 size = 2)
+p2U
+p2R <- p2U+  geom_point(data = misclassR, 
+                 aes(x= Education, y = Income), 
+                 colour = Ruralcolor, 
+                 size = 2)
+p2R
+```
+
+
+```{r Step3}
+p3 <- p2A +annotate("segment", 
+                   x = 0.31,
+                   xend = 0.31,
+                   y = 0.2,
+                   size=  1.5,
+                   yend = max(twoClass$Income),
+                   color = Urbancolor )+
+  labs(title = "Third node", 
+           subtitle = paste("Rule: ", gsub(",","",toString(myrules[3,2:13])))
+       )
+p3 
+
+p3A <- p3 + annotate("rect", 
+                     xmin= 0.31,
+                     xmax = max(twoClass$Education),
+                     ymin = 0.2,
+                     ymax = max(twoClass$Income),
+                     fill = Urbancolor, alpha = 0.2 )
+p3A  
+
+# Highlight Misclassified 
+misclassU <- twoClass %>%
+  filter(Income > 0.2 & Education > 0.13 & Education < .31 
+          & classes == "Urban")
+
+misclassR <- twoClass %>%
+   filter(Income > 0.2 & Education > 0.13 & Education > .31 
+          & classes == "Rural")
+    
+
+p3R <- p3A+  geom_point(data = misclassR, 
+                 aes(x= Education, y = Income), 
+                 colour = Ruralcolor, 
+                 size = 2)
+p3R
+     
+p3U <- p3R + geom_point(data = misclassU, 
+                 aes(x= Education, y = Income), 
+                 colour = Urbancolor, 
+                 size = 2)
+p3U
+
+```
+
+
+```{r Step4}
+p4 <- p3A +annotate("segment", 
+                   x = 0.13,
+                   xend = 0.31,
+                    y = 0.29,
+                   yend = 0.29,
+                   size = 1.5,
+                   color = Ruralcolor ) +
+   labs(title = " Fourth node rule", 
+           subtitle = paste("Rule: ", gsub(",","",toString(myrules[2,2:13])))
+           )
+p4 
+
+p4A <- p4 + annotate("rect", 
+                     xmin= 0.13,
+                     xmax = 0.31,
+                     ymin = 0.29,
+                     ymax = max(twoClass$Income),
+                     fill = Urbancolor, alpha = 0.2 )
+p4A
+
+p4B <- p4A + annotate("rect", 
+                        xmin= 0.13,
+                        xmax = 0.31,
+                        ymin = 0.2,
+                        ymax = 0.29,
+                        fill = Ruralcolor, alpha = 0.2 )
+
+p4B
+
+# Highlight Misclassified 
+misclassU <- twoClass %>%
+  filter(Income > 0.2 & Education > 0.13 & Education < .31 
+         & Income < 0.29 
+         & classes == "Urban")
+
+misclassR <- twoClass %>%
+    filter(Income > 0.2 & Education > 0.13 & Education < .31 
+         & Income > 0.29 
+          & classes == "Rural")
+    
+
+p4R <- p4B+  geom_point(data = misclassR, 
+                 aes(x= Education, y = Income), 
+                 colour = Ruralcolor, 
+                 size = 2)
+p4R
+     
+p4U <- p4R + geom_point(data = misclassU, 
+                 aes(x= Education, y = Income), 
+                 colour = Urbancolor, 
+                 size = 2)
+p4U
+
+
+```
+
+
+
+# Wrap-up
+- Decision tree can be quite easy to interpret
+
+
+
+
+
+
+
+

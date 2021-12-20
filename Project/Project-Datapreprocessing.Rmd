@@ -1,0 +1,184 @@
+---
+title: "Machine Learning Course"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson - SIAP
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+
+
+
+
+
+```{r packages, include=FALSE}
+# Data management packages
+library(dplyr)
+library(forcats)
+library(modelsummary)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(purrr)
+library(rattle)
+library(ggcorrplot)
+
+# Model fitting packages
+library(rpart)
+library(caret)
+library(leaps)  
+library(ModelMetrics)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+library(xtable)
+library(kableExtra)
+
+
+
+```
+
+
+```{r}
+# Import the downloaded data
+files <- read.csv("https://raw.githubusercontent.com/lavergnetse/Data/master/listings.csv", sep = ",")
+# Select the columns we want to keep from the initial listings csv files
+listings_keep <- c("id", "price", "host_is_superhost",
+                   "neighbourhood_group_cleansed",
+                   "latitude","longitude", "property_type", "accommodates",
+                   "bedrooms", "beds", "bed_type", "cleaning_fee",
+                   "minimum_nights", "availability_365",
+                   "review_scores_rating","cancellation_policy")
+
+```
+
+
+```{r}
+listings <- files[,listings_keep]
+listings <- listings[!duplicated(listings$id),]
+listings <- listings[complete.cases(listings$id),]
+listings$price <- as.numeric(gsub("[\\$,]", "", listings$price))
+listings$cleaning_fee <- as.numeric(gsub("[\\$,]", "", listings$cleaning_fee))
+listings$host_is_superhost[listings$host_is_superhost==""] <- NA
+listings <- listings %>% filter(accommodates >= beds) 
+```
+
+
+```{r}
+mydata <- listings
+mydata <- mydata %>%
+  group_by(
+    property_type,
+    accommodates) %>%
+  mutate(bedrooms=ifelse(is.na(bedrooms),
+                         median(bedrooms,na.rm = T),bedrooms)) %>%
+  ungroup()
+mydata[is.na(mydata$cleaning_fee), "cleaning_fee"] <- 0
+```
+
+
+```{r}
+mydata[is.na(mydata$cleaning_fee), "cleaning_fee"] <- 0
+mydata[is.na(mydata$host_is_superhost),"host_is_superhost"] <- "f"
+mydata <- mydata %>%
+  group_by(neighbourhood_group_cleansed,
+           bed_type,
+           property_type,
+           host_is_superhost) %>%
+  mutate(review_scores_rating=ifelse(is.na(review_scores_rating), 
+                                     median(review_scores_rating,na.rm=T),
+                                     review_scores_rating)) %>%
+  ungroup()
+
+mydata[is.na(mydata$review_scores_rating), "review_scores_rating"] <- median(mydata$review_scores_rating, na.rm = T)
+```
+
+```{r}
+Appartment <- c("Aparthotel","Serviced apartment", "Loft",
+                "Condominium", "Apartment")
+
+House <- c("Barn", "Dome house", "Lighthouse", "Houseboat",
+           "Treehouse", "Earth house", "Cottage", "Tiny house",
+           "Townhouse", "House", "Cabin","Villa")
+
+Shared_room <- c("Dorm", "Hostel", "Guesthouse", "Timeshare")
+
+Private_room <- c("Farm stay", "Bed and breakfast", "Resort", "Hotel",
+                  "Boutique hotel", "Guest suite", "In-law")
+
+Other <- c("Bungalow", "Train", "Bus", "Boat", "Other", "Cave", "Island",
+           "Camper/RV", "Yurt", "Castle", "Tent", "Casa particular (Cuba)")
+
+mydata$property_type <- as.character(mydata$property_type)
+
+mydata <-
+  mutate(mydata,
+         property_type = ifelse(property_type %in% Appartment,
+                                "Appartment", property_type),
+         property_type = ifelse(property_type %in% House,
+                                "House", property_type),
+         property_type = ifelse(property_type %in% Shared_room,
+                                "SharedRoom", property_type),
+         property_type = ifelse(property_type %in% Private_room,
+                                "PrivateRoom", property_type),
+         property_type = ifelse(property_type %in% Other,
+                                "Others", property_type))
+mydata <- mydata[!mydata$property_type=="Others",]
+mydata <- mydata[!mydata$property_type=="SharedRoom",]
+```
+
+
+```{r}
+mydata$cancellation_policy <- as.character(mydata$cancellation_policy)
+
+mydata <- mutate(mydata, 
+               cancellation_policy = 
+                 ifelse(cancellation_policy=="strict_14_with_grace_period",
+                        "strict", cancellation_policy),
+               cancellation_policy =
+                 ifelse(cancellation_policy=="super_strict_30", 
+                        "strict", cancellation_policy),
+               cancellation_policy =
+                 ifelse(cancellation_policy=="super_strict_60", 
+                        "strict", cancellation_policy))
+mydata <- mydata[,-which(names(mydata) == "bed_type")]
+mydata <- mutate(mydata, 
+               host_is_superhost = ifelse(host_is_superhost=="t", 
+                                          "True", "False"))
+```
+
+
+```{r}
+colnames(mydata)[which(names(mydata) == "neighbourhood_group_cleansed")] <- "neighborhood"
+mydata <- mydata %>% 
+  mutate(neighborhood = replace(neighborhood, neighborhood == "Bronx", "B-Zone"),
+         neighborhood = replace(neighborhood, neighborhood == "Brooklyn", "A-Zone"),
+         neighborhood = replace(neighborhood, neighborhood == "Manhattan", "M-Zone"),
+         neighborhood = replace(neighborhood, neighborhood == "Queens", "Q-Zone"),
+         neighborhood = replace(neighborhood, neighborhood == "Staten Island", "S-Zone")
+         )
+
+```
+
+
+```{r}
+mydata <- select(mydata, -id)
+mydata <- mutate_if(mydata, is.character, as.factor)
+write.csv(mydata, "clean_data.csv", row.names = FALSE)
+```
+
+

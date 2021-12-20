@@ -1,0 +1,398 @@
+---
+title: "Machine Learning Course"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson - SIAP
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, results =TRUE, echo = TRUE) 
+
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+
+```
+
+`r if(knitr:::pandoc_to() == "latex") {paste("\\large")}` 
+
+```{r packages, include=FALSE}
+# Data management packages
+library(dplyr)
+library(forcats)
+library(here)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(ggcorrplot)
+library(purrr)
+library(rpart.plot)
+
+# Model fitting packages
+library(caret)
+library(glmnet)
+library(MLmetrics)
+library(MASS) 
+
+# Nice presentation of results
+library(knitr)
+library(xtable)
+library(kableExtra)
+library(papeR)
+```
+
+# Introduction
+
+In this markdown the main focus will be on selecting a good model, through variable selection algorithms and regularization. We will use more variables than in the previous markdown, as we will explore methods like Stepwise-regression, Ridge regression and Lasso regression to see if we can use some other tools to find a good model that can explain whether or not marriage before the age of 15 will occur. Through Cross validation we can also evaluate if the fitted models produces results that generalizes well.  
+
+### Data preprocessing 
+
+```{r}
+
+# Reading DHS survey data 
+ChildMarriagedf <- read.csv(here("../data/ChildMarriage.csv"))
+
+# Explanation of datasets variables can be found here: https://dhsprogram.com/pubs/pdf/DHSG4/Recode7_DHS_10Sep2018_DHSG4.pdf
+
+# Filters the data set down to a few variables
+ChildMarriage <- ChildMarriagedf %>% dplyr::select(Before15 = Before15, Residence = HV025, Aridity = Aridity2015, WealthIndex = aWealthIndex2011, Density = Density2015, Education = Education, Age = Age, WealthLevel = HV270, MarriageStatus = HV116)
+
+
+# Makes the categorical variables into factors
+factor_columns <- c('Before15', 'Residence', 'Education', 'WealthLevel', 'MarriageStatus')
+ChildMarriage[factor_columns] <- lapply(ChildMarriage[factor_columns], factor)
+levels(ChildMarriage$Before15) <- c("Unmarried", "Married")
+
+
+# We remove a few observations which has missing some missing values
+ChildMarriage  <- ChildMarriage %>% na.omit() 
+
+# Crates a summary of the dataset when knitting the markdown file
+xtable(summary(ChildMarriage)) %>%
+  kable(digits=2) %>%
+  kable_styling()
+
+summary(ChildMarriage)
+```
+
+```{r}
+
+
+# We compute the correlation matrix of the covariates
+corr_coef<-cor(ChildMarriage[,c(3,4,5,7)],use = "p")
+#And then plot it with nice options 
+ggcorrplot(corr_coef, 
+           type = "lower",         # lower triangle of the matrix only
+           hc.order = TRUE,        # variable sorted from highest to lowest
+           outline.col = "white",  #Color options
+           lab = TRUE) + ggtitle("Correlation between numerical variables")
+```
+
+
+
+
+```{r}
+# function to set up random seeds
+setSeeds <- function(method = "cv", numbers = 1, repeats = 1, tunes = NULL, seed = 1237) {
+  #B is the number of resamples and integer vector of M (numbers + tune length if any)
+  B <- if (method == "cv") numbers
+  else if(method == "repeatedcv") numbers * repeats
+  else NULL
+  
+  if(is.null(length)) {
+    seeds <- NULL
+  } else {
+    set.seed(seed = seed)
+    seeds <- vector(mode = "list", length = B)
+    seeds <- lapply(seeds, function(x) sample.int(n = 1000000, size = numbers + ifelse(is.null(tunes), 0, tunes)))
+    seeds[[length(seeds) + 1]] <- sample.int(n = 1000000, size = 1)
+  }
+  # return seeds
+  seeds
+}
+```
+
+
+```{r}
+# Repeated cross validation
+rcvSeeds <- setSeeds(method = "repeatedcv", 
+                      numbers = 5, repeats = 5, 
+                      tunes = 100, seed = 777)
+
+# Configure the trainControl argument for cross-validation
+K5_CV_seed <- trainControl(method = "cv", number = 5, classProbs = FALSE, 
+                           savePredictions = TRUE, seeds = rcvSeeds,
+                           allowParallel = TRUE)
+```
+
+
+
+
+
+```{r}
+# Partitions the data into training and testing sets. 
+set.seed(1235)
+trainIndex <- createDataPartition(ChildMarriage$Before15, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+train_data <- ChildMarriage[ trainIndex,]
+validation_data  <- ChildMarriage[-trainIndex,]
+```
+
+```{r}
+# Scale the training and test data based on the training data mean and variance.
+ScalingValues <- preProcess(train_data, method = c("center", "scale"))
+train_data <- predict(ScalingValues, train_data)
+validation_data <- predict(ScalingValues, validation_data)
+```
+
+
+> Why do we scale the testing data using parameters from the training data?
+
+
+If we were to scale the testing part before we split, i.e. using all data, our test data is not unseen by the time we use it to validate our model which defeats the point of splitting the data into training and validation. If we use parameters from the testing data to scale the testing data our predictions may become skewed. This is due to our model being trained using the scale and centering of the training data, so any deviation in the validation data should only deviate from the data we train it upon. 
+
+
+### Model fitting
+
+First we fit a model with all the variables in the data set, this will give us an insight into the relationship between our target variable and its explanatory variables. 
+
+```{r, cache = TRUE}
+
+# glm encodes Rural = 0, Urban = 1 (by default it goes by the alphabet)
+log_fit = train(form = Before15 ~ .,
+                data = train_data,
+                method = "glm",
+                family = "binomial",
+                trControl = K5_CV_seed)
+```
+
+
+```{r}
+summary(log_fit)
+```
+#### 
+
+```{r}
+log_fit
+```
+
+### Variable importance plot Logistic Regression
+
+```{r}
+
+theme_models <- theme(plot.title = element_text(hjust = 0.5),
+                plot.background = element_rect(),
+                legend.position = "none") 
+
+Logistic_varImp <- data.frame(variables = row.names(varImp(log_fit)$importance), varImp(log_fit)$importance)
+
+ggplot(data = Logistic_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Logistic Regression") 
+```
+
+### Confusion Matrix
+
+```{r}
+# Creates confusion matrix on the test data
+#confusionMatrix(table(predict(log_fit, type="prob")[,"Married"] >= 0.5, validation_data$Before15 == "Married"))
+```
+
+# Variable selection 
+
+## Stepwise regression
+
+Using the regsubsets() from the leaps package we can perform an automatic variable selection such as **forward selection**, **backward elimination**, or **exhaustive search** to find a better model. For this part we will skip using cross validation, as stepwise regression has 2^p candidate models where p is the amount of explanatory variables. Meaning with 10 explanatory variables we have 1024 candidate models even without cross validating the results. The resulting model of the automatic variable selection can instead be cross validated separately later to see if it generalizes well. 
+
+```{r, Stepwise, cache=TRUE}
+set.seed(777)
+
+stepwise_fit <- train(form = Before15 ~ .,
+                   data = train_data,
+                   method = "glmStepAIC",
+                   direction ="backward",
+                   family = "binomial")
+
+```
+
+```{r}
+summary(stepwise_fit$finalModel)
+```
+
+```{r}
+
+theme_models <- theme(plot.title = element_text(hjust = 0.5),
+                plot.background = element_rect(),
+                legend.position = "none") 
+
+Logistic_varImp <- data.frame(variables = row.names(varImp(stepwise_fit)$importance), varImp(stepwise_fit)$importance[2])
+ggplot(data = Logistic_varImp, mapping = aes(x=reorder(variables, Married),
+                                        y=Married,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Stepwise Logistic Regression") 
+```
+
+
+```{r}
+# Creates confusion matrix on the test data
+#confusionMatrix(table(predict(stepwise_fit, type="prob")[,"Married"] >= 0.5, validation_data$Before15 == "Married"))
+```
+
+# Regularization techniques
+
+Using regularization we can prevent the common problem of model complexity. When we have a model with many explanatory variables they tend to have large variances, especially so if there is correlation in the data. This will affect the reliability of the fitted model. If you recall the **bias and variance** tradeoff, we use **regularization** techniques to intentionally introduce **bias** in our model with the result of lowering the **variance**. 
+
+
+
+https://machinelearningmastery.com/weight-regularization-to-reduce-overfitting-of-deep-learning-models/
+https://machinelearningmastery.com/how-to-reduce-overfitting-in-deep-learning-with-weight-regularization/
+https://towardsdatascience.com/ridge-and-lasso-regression-a-complete-guide-with-python-scikit-learn-e20e34bcbf0b
+https://www.datacamp.com/community/tutorials/tutorial-ridge-lasso-elastic-net
+
+## Least Absolute Shrinkage and Selection Operator (LASSO)
+
+A very common form of regularization in machine learning is **LASSO**. It is commonly referred to as **L1 regularization**. The **LASSO** regularization shrinks unnecessary parameters estimates to 0 to simplify the model:
+
+$$L_{LASSO}(\hat{\beta}) = \Sigma_{i=1}^n (y_i - x'_i \hat{\beta})^2 + \lambda \Sigma_{j-1}^m |\hat{\beta}_j|$$
+LASSO will start to drop variables with an increasing $\lambda$.
+
+```{r}
+set.seed(777)
+
+lasso_fit <- train(form = Before15 ~ .,
+                   data = train_data,
+                   method = "glmnet",
+                   family = "binomial",
+                   # Alpha = 1 fits a lasso model
+                   tuneGrid = expand.grid(alpha = 1, 
+                                          lambda = seq(0, 0.001, 0.0001)),
+                   preProcess = c("scale","center"),
+                   trControl = K5_CV_seed)
+
+ggplot(lasso_fit) +
+  ggtitle("Lasso - Parameter tuning") +
+  theme_minimal()
+``` 
+
+
+### Variable importance plot Logistic Regression using LASSO
+
+```{r}
+
+theme_models <- theme(plot.title = element_text(hjust = 0.5),
+                plot.background = element_rect(),
+                legend.position = "none") 
+
+Logistic_varImp <- data.frame(variables = row.names(varImp(lasso_fit)$importance), varImp(lasso_fit)$importance)
+
+ggplot(data = Logistic_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Logistic LASSO Regression") 
+```
+
+
+
+```{r}
+# Predict using a standard 0.5 threshold
+#confusionMatrix(table(predict(lasso_fit, type="prob")[,"Married"] >= 0.5, validation_data$Before15 == "Married"))
+```
+
+
+## Ridge
+
+**Ridge** is another common form of regularization in machine learning, commonly referred to as **L2 regularization**. Unlike **LASSO** which shrinks parameter estimates to 0 and performs variable selection, **Ridge** will only shrink the estimated coefficient towards 0. 
+
+$$L_{ridge}(\hat{\beta}) = \Sigma_{i=1}^n (y_i - x'_i \hat{\beta})^2 + \lambda \Sigma_{j-1}^m \hat{\beta}^2_j$$
+For ridge regularization when $\lambda$ approaches 0, the ridge estimates become more like the OLS estimates, whereas when $\lambda$ increases the estimated coefficients will approach 0. 
+
+
+
+```{r}
+set.seed(777)
+
+  
+ridge_fit <- train(form =  Before15 ~ Residence + Aridity + WealthIndex + Density + Education + Age + WealthLevel + MarriageStatus,
+                   data = train_data,
+                   method = "glmnet",
+                   family = "binomial",
+                   # Alpha = 0 fits a lasso model
+                   tuneGrid = expand.grid(alpha = 0, 
+                                          lambda = seq(0, 0.01, 0.0005)),
+                   preProcess = c("scale","center"),
+                   trControl = K5_CV_seed)
+
+ggplot(ridge_fit) +
+  ggtitle("Ridge - Parameter tuning") +
+  theme_minimal()
+``` 
+
+
+> What is the difference between how a model is regularized when using LASSO compared to Ridge? When do you want to use which form of regularization? 
+
+**Lasso** shrinks less important features to 0, which will end up being a way of performing variable selection. The **LASSO** approach is useful when only a handful of the variables are actually important in the fitted model. 
+
+**Ridge** regularization shrinks estimated coefficients towards 0. This can be useful when most parameters in the model has an impact on the target variable.  
+
+
+> Why is it important to center and scale variables before performing LASSO and Ridge regularization?
+
+Scaling ensures that the penalty term penalizes each coefficient equally. 
+
+```{r}
+
+theme_models <- theme(plot.title = element_text(hjust = 0.5),
+                plot.background = element_rect(),
+                legend.position = "none") 
+
+Logistic_varImp <- data.frame(variables = row.names(varImp(ridge_fit)$importance), varImp(ridge_fit)$importance)
+
+ggplot(data = Logistic_varImp, mapping = aes(x=reorder(variables, Overall),
+                                        y=Overall,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Logistic Ridge Regression") 
+```
+
+```{r}
+# Predict using a standard 0.5 threshold
+#confusionMatrix(table(predict(ridge_fit, type="prob")[,"Married"] >= 0.5, validation_data$Before15 == "Married"))
+```
+
+

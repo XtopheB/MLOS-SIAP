@@ -1,0 +1,489 @@
+---
+title: "Machine Learning Course"
+subtitle: "Support Vector Machine"
+author: 
+- Christophe Bontemps & Patrick Jonsson - SIAP
+output:
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+    extra_dependencies: ["float"]
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE,echo = TRUE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+
+```
+
+```{r packages, include=FALSE}
+# Data management packages
+library(dplyr)
+library(here)
+library(forcats)
+library(modelsummary)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(purrr)
+
+# Model fitting packages
+library(caret)
+library(regclass)
+library(MLmetrics)
+library(e1071)
+library(pROC)
+library(MASS)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+library(xtable)
+library(kableExtra)
+```
+
+```{r}
+# Parallel computing to make training faster
+library(parallel)
+nrcore <- detectCores()
+cl <- parallel::makeCluster(nrcore-1, setup_strategy = "sequential")
+
+library(doParallel)
+registerDoParallel(cl)
+```
+
+# Introduction
+Support Vector Machines or SVM hereafter, have been shown to perform well in a variety of settings, and are often considered one of the best classifiers.
+In this file we will mainly cover the intuition and some theory about SVM. The components of the algorithm will be explained, together with how their hyperparameters affect the model fitting. The focus in this file is not to fit and evaluate this model, as this is something that we have focused on in depth in previous modules and the workflow is the same as you have seen in these previous files. However, code will be provided towards the end of the file that you can use in any future project to fit different SVM models, as well as to evaluate their performance. 
+
+# Support Vector Machines
+
+## Intuition
+
+SVM is a **supervised** machine learning model used for classifying and producing nonlinear boundaries from a linear boundary in an augmented version of the feature space. With the use of a *kernel trick*,  the SVM can map nonlinear data into a higher dimensional space, where it can find a linear hyperplane to separate the classes. This may sound confusing at first, so we will first consider a simple example with two different hypothetical cases created from generated data. In that situation, it is easy to separate the cases using a simple linear boundary.
+
+```{r initial}
+n <- 30
+R1 <- matrix(c(1, 0,
+               0, 1), 
+            nrow = 2, ncol = 2)
+
+mu1 <- c(X = 0, Y = 6)
+
+R2 <- matrix(c(1, 0,
+               0, 1), 
+            nrow = 2, ncol = 2)
+
+mu2 <- c(X = 6, Y = 0)
+set.seed(777)
+classA <- data.frame(MASS::mvrnorm(n, mu = mu1, Sigma = R1))
+set.seed(777)
+classB <- data.frame(MASS::mvrnorm(n, mu = mu2, Sigma = R2))
+classA$class <- as.factor("A")
+classB$class <- as.factor("B")
+df <- rbind(classA,classB)
+svmfit=svm(class~., df, kernel="linear", scale=FALSE)
+p <- ggplot(df, aes(x=X, y=Y, color=class)) +
+  geom_point() +
+  labs(x = "X1", y = "X2")+
+  theme_minimal()
+
+p
+# Now with a linear boundary line 
+p +  geom_abline(slope=1,intercept=0)
+ 
+
+```
+
+Finding a way to separate *class A* from *class B* is an easy task there. But what happens when the data has plenty of overlap? How would we linearly separate the following data?
+
+```{r overlap}
+n <- 100
+R1 <- matrix(c(1, 0,
+               0, 1), 
+            nrow = 2, ncol = 2)
+
+mu1 <- c(X = 0, Y = 0)
+
+R2 <- matrix(c(0.1, 0,
+               0, 0.1), 
+            nrow = 2, ncol = 2)
+
+mu2 <- c(X = 0, Y = 0)
+set.seed(777)
+classA <- data.frame(MASS::mvrnorm(n, mu = mu1, Sigma = R1))
+set.seed(777)
+classB <- data.frame(MASS::mvrnorm(n, mu = mu2, Sigma = R2))
+classA$class <- as.factor("A")
+classB$class <- as.factor("B")
+df <- rbind(classA,classB)
+
+ggplot(df, aes(x=X, y=Y, color=class)) +
+  geom_point()+
+  labs(x = "X1", y = "X2")+
+  theme_minimal()
+
+```
+
+There is no possible solution with a linear classifier,  to create a good separation between class A and class B. But if we map the data to a higher dimension, we may find that the distribution becomes much easier to separate. If we map the data to a new dimension **X3**, the joint distribution of **X1** and **X3** might look something like this:
+
+![](https://www.unsiap.or.jp/on_line/ML/M5-SVMGif.gif)
+
+```{r interactive, plotly = TRUE}
+
+# Simulating A new dimension variable
+N <-nrow(df)
+betas<-rbeta(N,2,2)
+
+df$X3 = c(betas[1:(N/2)]*2+1,
+          betas[(N/2+1):N]*2+2.9)
+
+# 3d- Scatterplot
+library(plotly)
+fig <- plot_ly(df, x = ~X, y = ~Y, z = ~X3,
+               color = ~class,
+               colors = c('#BF382A', SIAP.color),
+               size =2, 
+               alpha = 0.7
+               )
+fig <- fig %>% add_markers() 
+ggplotly(fig)
+```
+
+
+
+
+```{r augmented}
+n <- 100
+R1 <- matrix(c(1, 0,
+               0, 0.01), 
+            nrow = 2, ncol = 2)
+
+mu1 <- c(X = 0, Y = 0)
+
+R2 <- matrix(c(0.1, 0,
+               0, 0.01), 
+            nrow = 2, ncol = 2)
+
+mu2 <- c(X = 0, Y = 2)
+set.seed(777)
+classA <- data.frame(MASS::mvrnorm(n, mu = mu1, Sigma = R1))
+set.seed(777)
+classB <- data.frame(MASS::mvrnorm(n, mu = mu2, Sigma = R2))
+classA$class <- as.factor("A")
+classB$class <- as.factor("B")
+df <- rbind(classA,classB)
+
+p <- ggplot(df, aes(x=X, y=Y, color=class)) +
+  geom_point()+
+  labs(x = "X1", y = "X3")+
+  theme_minimal()
+p
+# Now with a linear hyperplane 
+p + geom_abline(slope=0,intercept=1)
+
+```
+
+In this new higher dimensional space, we may be easier to  find a hyperplane to linearly separate the data. 
+
+> How to find this new dimension is one of the tricks of SVMs (see later)
+
+# Ideas at the core of the SVM method
+The previous reasoning is fully based on the existence of a very well adjusted new dimension $X3 that is allowing the separation between classes. 
+How to construct this new variable requires some advanced mathematical method, we highlight here some of the main ideas in simple terms as the details become somewhat technical. 
+
+## Dimension augmentation
+From the simple example presented above, we can notice that: 
+
+* There should be a space where a linear separator will do the job
+* A linear separator in the "augmented" space (hyperplane) should be able to separate the two classes
+* This hyperplane is the solution of a minimization problem in the augmented space, here $(X_1, X_2, X_3)$.^[In practice we may need to create **more than one** additional dimension to solve the problem! ]
+* There may be different hyperplanes that separate the data in the augmented space, but only one maximizes the margin. 
+
+
+## Maximal Margin Classifier
+
+Going back to the previous visualization between the **X1** and **X3** variables, we were able to divide the two classes with a line. The SVM is a method that will find the maximum margin separating hyperplane. This means that it will find the hyperplane which maximizes the distance between to the closest data points from both classes, this is called the **hyperplane with maximum margin**. 
+
+We reuse the previous visualization, but we add two dashed lines this time:
+
+
+```{r marginal}
+n <- 100
+R1 <- matrix(c(1, 0,
+               0, 0.01), 
+            nrow = 2, ncol = 2)
+
+mu1 <- c(X = 0, Y = 0)
+
+R2 <- matrix(c(0.1, 0,
+               0, 0.01), 
+            nrow = 2, ncol = 2)
+
+mu2 <- c(X = 0, Y = 2)
+set.seed(777)
+classA <- data.frame(MASS::mvrnorm(n, mu = mu1, Sigma = R1))
+set.seed(777)
+classB <- data.frame(MASS::mvrnorm(n, mu = mu2, Sigma = R2))
+classA$class <- as.factor("A")
+classB$class <- as.factor("B")
+df <- rbind(classA,classB)
+P.marg <- ggplot(df, aes(x=X, y=Y, color=class)) +
+          geom_point() +
+          geom_abline(slope=0,intercept=1, colour='#8856a7', lwd=1) +
+          geom_abline(slope=0,intercept=max(classA$Y),linetype = "dashed") +
+          geom_abline(slope=0,intercept=min(classB$Y),linetype = "dashed") +
+          geom_segment(aes(x = -2.4, y = 1, xend = -2.4, yend = min(classB$Y)),
+                          arrow = arrow(length = unit(0.5, "cm")),
+                       colour='#636363') +
+          geom_segment(aes(x = 2.4, y = 1, xend = 2.4, yend = max(classA$Y)),
+                          arrow = arrow(length = unit(0.5, "cm")),
+                       colour='#636363') +
+          labs(x = "X1", y = "X3") +
+          theme_minimal()
+P.marg
+
+```
+
+Each of the dashed line goes through the data point of the respective class which is closest to the **maximum margin hyperplane** (the decision boundary), visualized in purple. The data points which the dashed lines crosses through are called the **support vectors**. The distance between the decision boundary and the support vector, visualized by the arrows, is called the **margin** $M$. 
+
+
+This is a very simple and somehow *ideal* illustration. In the definition of the margin $M$, as illustrated above, we are not allowing any point to be inside the margin, nor are we allowing errors in the classification. The maximization problem used to find the classifier with the maximum margin $M$ can be written as: 
+$$
+ Max_{\beta_0, \beta_1} M \\
+ subject\; to:\; y_i(\beta_0 +x_{1i}'\beta_1) \geq M  
+$$
+
+where:
+
+* $y_i$ takes the values  1 or -1 depending on the class of observation $i$
+* $\beta_0 +x_1i'\beta_1$ defines the hyperplane (here a line)
+The band in the figure is $M$ units away from the hyperplane on either side, and hence 2M units wide.
+
+But we can soften this optimization program and define a *slack variable* $\xi$ to allow points inside the margin and even some misclassification:^[In practice, with many dimensions, there are many slack parameters, and some constrains on the  sum of the slack parameters values are introduced to help with the optimization process. ]
+$$
+ Max_{\beta_0, \beta_1} M \\
+ subject\; to:\; y_i(\beta_0 +x_{1i}'\beta_1) \geq M - \xi  
+$$
+
+This hyperparameter, *slack* $\xi$, controls how many data points can violate the assumption of being placed inside of the margin. Intuitively we want as few points as possible within the margin, and if they are within the margin they should be as close as possible to their support vector, as this would create the best separation of the classes. 
+
+
+## Finding the separation hyperplane
+
+From the intuition described above, we know that the best way to solve the problem and find the separating hyperplane should be written in an augmented space. However, staying in the context of a 2 dimensional problem:
+
+* The new dimension $X_3$ should be constructed from the original variables $(X_1, X_2$), so we should find a function $\phi(\cdot)$ so that  $X_3 = \phi(X_1, X_2)$. 
+* It can be very costly to apply $\phi(\cdot)$  to each observation since $\phi()$ can be quite complex, the number of observations quite large and  the dimension of the augmented space quite large.
+
+
+>There is a "trick" known as the *kernel trick* that simplifies the problem and avoids computing $\phi()$ to solve the minimization problem identifying the linear   separating hyperplane. 
+
+## The *Kernel trick* 
+
+One may take advantage of using a **kernel** function $K(\cdot)$ rather than simply enlarging the space using $\phi(\cdot)$. The problem can then be solved by uniquely using the values of $K(X_i, X_j)$ for all distinct pairs of observations  $i, j$. 
+
+A kernel is a function that quantifies the similarity of two observations, such as the *inner product*, which is a very simple kernel. It turns out that the solution to the support vector classifier problem, in the augmented space, can be rewritten using only transformations of the  observations through kernels, as opposed to the observations themselves. The Solution can thus be written without really augmenting the space.
+
+It important to notice that the even if the solution is linear in the its formulation in the augmented space, it becomes non linear in the original space of the observations. 
+
+### Kernels
+As previously mentioned it is due to the *kernel trick* that we can map the data into higher dimensions.
+
+There are several different kernels that can be used. Common ones are linear kernels, polynomial kernels and the radial basis function (RBF) kernel. If you have data that can be linearly separable, the linear kernel has the benefit of being a parametric model, which means that the computational time is constant regardless of the amount of data. Linearity in nature is uncommon to find though, and empirically the RBF kernel tends to perform well. This comes at the cost of being more computationally demanding and requiring more hyperparameter tuning. 
+
+**Linear Kernel**: 
+
+$$K(x, y) = x^Ty$$
+
+In the formula *x* and *y* are input vectors and *T* denotes the transpose. 
+
+
+**Polynomial Kernel**:
+
+$$K(x, y) = (x^Ty + r)^d $$
+
+As in the linear kernel *x* and *y* are input vectors, *T* denotes the transpose. The *r* is a scaling constant, and *d* is the degree of the polynomial kernel. The values for *r* and *d* is found through cross-validation.
+
+
+**RBF Kernel**: 
+
+$$K(x, y) = e(-\frac{||x-y||^2}{2 \sigma^2}) = e(-\gamma ||x-y||^2)$$
+In the RBF $\gamma$ is a tuneable hyperparameter in the model. It controls the width of the distribution, where large values for $\gamma$ creates a narrower distribution, and smaller values of $\gamma$ increases the width. $||x-y||^2$ denotes the euclidian distance.  
+
+
+The $\gamma$ parameter defines how far the influence of a single training example reaches, with low values meaning ‘far’ and high values meaning ‘close’. The lower values of $\gamma$ result in models with lower accuracy and the same as the higher values of gamma. An intuitive way to think of this is that the decision boundary is reshaped so that similar data points will be clustered.
+
+
+
+
+# Application: Model fitting
+
+## Data loading and preprocessing 
+
+```{r}
+
+# Reading DHS survey data
+# Explanation of datasets variables can be found here: https://dhsprogram.com/pubs/pdf/DHSG4/Recode7_DHS_10Sep2018_DHSG4.pdf
+ChildMarriagedf <- read.csv(here("../data/ChildMarriage.csv"))
+
+
+# Filters the data set down to a few variables
+ChildMarriage <- ChildMarriagedf %>% 
+  dplyr::select(Before15 = Before15, Residence = HV025, Aridity = Aridity2015,
+                WealthIndex = aWealthIndex2011, Density = Density2015,
+                Education = Education, Age = Age)
+
+
+
+# Makes the categorical variables into factors
+factor_columns <- c('Before15', 'Residence', 'Education')
+ChildMarriage[factor_columns] <- lapply(ChildMarriage[factor_columns], factor)
+levels(ChildMarriage$Before15) <- c("Unmarried", "Married")
+
+
+# We remove a few observations which has missing some missing values
+ChildMarriage  <- ChildMarriage %>% na.omit() 
+```
+
+
+```{r, include = FALSE}
+# Splits data into training and testing sets
+set.seed(777)
+trainIndex <- createDataPartition(ChildMarriage$Residence, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+train_data <- ChildMarriage[ trainIndex,]
+validation_data  <- ChildMarriage[-trainIndex,]
+
+```
+
+
+
+As in previous model we can keep using the *train()* function in caret, we specify different kernels by using the method parameter. 
+To use the previously mentioned kernels you can specify this by using the following: *svmLinear*, *svmPoly*, and *svmRadial*. As SVMs are quite computationally demanding, starting off with a linear kernel can be good to both evaluate the difficulty of your task as well as how long it takes to fit the model. 
+
+
+## Linear SVM
+
+```{r, cache = TRUE}
+linear_svm_fit <- train(
+  Residence ~., data = train_data, method = "svmLinear",
+  trControl = trainControl("cv", number = 5),
+  preProcess = c("center","scale"),
+  tuneLength = 5,
+  allowParallel = TRUE)
+
+linear_svm_fit
+```
+
+And we can assess the out of sample performance of the linear SVM:
+
+```{r}
+linear_pred <- predict(linear_svm_fit, validation_data)
+
+svm_confus <- caret::confusionMatrix(data = linear_pred, reference = validation_data$Residence, positive = "Urban")
+
+svm_confus
+```
+
+We notice that the linear kernel performs well in regards to accuracy, kappa, sensitivity and specificity. As before we can also evaluate the feature importance of the fitted SVM:
+
+```{r VIFSVM}
+
+theme_models <-  theme_minimal()+  theme(plot.title = element_text(hjust = 0.5),
+                legend.position = "none") 
+
+SVM_varImp <- data.frame(variables = row.names(varImp(linear_svm_fit)$importance), varImp(linear_svm_fit)$importance)
+
+ggplot(data = SVM_varImp, mapping = aes(x=reorder(variables, Urban),
+                                        y=Urban,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Linear SVM") 
+```
+
+As in other modules that has used this example, the *density* variable is the most important, which is not too surprising. In this one the *wealthindex* variable is also very important to the fitted model, whereas the rest of the are deemed less important, and *age* does not seem to be an important feature in the fitted model. 
+
+## Radial SVM
+
+We can also see if there is any added benefit of using an RBF kernel to this problem. If there are non-linearities in the data set we expect the non linear kernels to outperform the linear kernel.
+
+```{r, cache = TRUE}
+# This may take a few minutes to run
+radial_svm_fit <- train(
+  Residence ~., data = train_data, method = "svmRadial",
+  trControl = trainControl("cv", number = 5),
+  preProcess = c("center","scale"),
+  tuneLength = 5,
+  allowParallel = TRUE)
+
+radial_svm_fit
+```
+
+
+```{r}
+radial_pred <- predict(radial_svm_fit, validation_data)
+
+svm_confus_radial <- confusionMatrix(data = radial_pred, reference = validation_data$Residence, positive = "Urban")
+
+svm_confus_radial
+```
+
+There seems to be no added benefit of using a non-linear kernel to this problem, as there is no significant difference in performance between the two fitted models. Lastly we can see if the feature importance of the two models are similar to each other:
+
+```{r VIFSVMRadial}
+SVM_varImp_radial <- data.frame(variables = row.names(varImp(radial_svm_fit)$importance), varImp(radial_svm_fit)$importance)
+
+ggplot(data = SVM_varImp_radial, mapping = aes(x=reorder(variables, Urban),
+                                        y=Urban,
+                                        fill=variables)) +
+  coord_flip() + geom_bar(stat = "identity", position = "dodge") +
+  theme_models +
+  labs(x = "", y = "") +
+  ggtitle("Feature Importance Radial SVM") 
+```
+
+The feature importance is also not distinguishable from the linear kernel. This means that a linear kernel is sufficient for this task, and we gain no benefit from increasing the complexity.
+
+
+
+
+
+
+http://rstudio-pubs-static.s3.amazonaws.com/520528_605887dbc9944bedb57518df7a29935f.html
+
+# Wrap-up
+- SVM is a maximum margin classifier, as it maximizes the margin of the hyperplane (decision boundary)
+- Extensions of SVM can be used for regression tasks and clustering
+- Most often we will not find a perfect separation of the classes, so we may need to introduce a slack variable that 
+allows for data points inside the margin, or on the wrong side of the decision boundary. 
+- Several different kernels can be used to optimize the fitted model. SVMs can be computationally expensive, so you 
+might want to try a linear kernel first.
+
+******
+
+# Corresponding functions if you use Python
+
+- *Pandas* and numpy offers great data managing functions that are compatible with *sklearns* model fitting functions.
+- Using *sklearn* in python the function *svm.SVC()* fits an SVM for classifying tasks. 
+- Together with *sklearn* and *matplotlib* you can visualize the decision boundary that is created for SVMs. 

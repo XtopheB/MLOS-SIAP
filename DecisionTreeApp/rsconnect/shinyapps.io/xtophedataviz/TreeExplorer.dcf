@@ -1,0 +1,13 @@
+name: TreeExplorer
+title: TreeExplorer
+username:
+account: xtophedataviz
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 5043183
+bundleId: 5213519
+url: https://xtophedataviz.shinyapps.io/TreeExplorer/
+when: 1636042775.40716
+lastSyncTime: 1636042775.40716
+asMultiple: FALSE
+asStatic: FALSE

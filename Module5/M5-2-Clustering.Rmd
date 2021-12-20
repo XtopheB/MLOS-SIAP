@@ -1,0 +1,311 @@
+---
+title: "Machine Learning in Practice: Unsupervized learning"
+subtitle: "K-means and other clustering methods"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: 
+  - Christophe Bontemps & Patrick Jonsson 
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    keep_md: yes
+    code_folding: show
+    fig_width: 6.5
+    fig_height: 4
+  pdf_document:
+    df_print: kable
+    toc: yes
+    keep_tex: yes
+    fig_width: 6.5
+    fig_height: 4
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, results =FALSE, echo = TRUE) 
+
+```
+
+
+```{r Knitr_Global_Options, include=FALSE, cache=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, 
+               autodep = TRUE, tidy = FALSE, cache = TRUE)
+#opts_chunk$set(cache.rebuild=TRUE) 
+
+# My colors:
+SIAP.color <- "#0385a8"
+
+```
+
+```{r packages, include=FALSE}
+
+
+# Data management packages
+library(dplyr)
+library(plotly)
+
+# Plotting packages
+library(ggplot2)
+library(RColorBrewer)
+library(purrr)
+
+
+# Clustering
+library(factoextra)
+library(cluster)
+library(eclust)
+
+# Nice presentation of results
+library(knitr)
+library(papeR)
+library(xtable)
+library(kableExtra)
+
+```
+
+```{r, include=FALSE}
+# Parallel computing to make training faster
+library(parallel)
+nrcore <- detectCores()
+cl <- parallel::makeCluster(nrcore-1, setup_strategy = "sequential")
+
+library(doParallel)
+registerDoParallel(cl)
+```
+
+# Introduction
+
+In this file we will cover the intuitions behind clustering, mainly focussing on *K-means* clustering. We will see how this algorithm works and cover things that are good to keep in mind while using clustering methods. We will also mention some other methods such as *hierarchical* and *density based* clustering at a high level. 
+
+**Clustering**
+
+Clustering methods are a set of unsupervised learning methods, meaning that we do not have an intended target variable. In clustering we want to create a set of groups which observations in our data will belong to. The goal in clustering is to minimize the distance between the data points inside the clusters, and to maximize the distance between data points in different clusters. This will allow us to gain a better insight into the data set, as we can find similarities and dissimilarities in the data. 
+
+
+# K-means clustering
+
+In K-means clustering we use the euclidean  distance to minimize the variation within the clusters, and maximize the variation between the $K$ amount of clusters. Initially each data point is assigned to the nearest cluster, and for each iteration we move each centroid (the middle of the cluster) so the sum of the distance between each data point corresponding to that cluster and the centroid of the cluster is minimized. This might sound very confusing, but we will see now that it is very intuitive. 
+
+
+## Intuition 
+
+To show how the algorithm works we will consider a simple example, where we generate three distinct clusters of data points. We will also manually initiate the centroids of the clusters in specific place so they can converge without any problems, to show how the algorithm works.
+
+```{r}
+
+
+# Creates three distinct mean vectors and covariance matrices
+R1 <- matrix(c(0.1, 0,
+               0, 0.01), 
+            nrow = 2, ncol = 2)
+
+mu1 <- c(X = -2, Y = 0)
+
+R2 <- matrix(c(0.1, 0,
+               0, 0.01), 
+            nrow = 2, ncol = 2)
+
+mu2 <- c(X = 0, Y = 2)
+
+R3 <- matrix(c(0.1, 0,
+               0, 0.01), 
+            nrow = 2, ncol = 2)
+
+mu3 <- c(X = 2, Y = 0)
+
+# Randomly generates 100 data points from three multivariate normal distributions, using the previously defined parameters
+n <- 100
+
+set.seed(777)
+d1 <- data.frame(MASS::mvrnorm(n, mu = mu1, Sigma = R1))
+
+set.seed(777)
+d2 <- data.frame(MASS::mvrnorm(n, mu = mu2, Sigma = R2))
+
+set.seed(777)
+d3 <- data.frame(MASS::mvrnorm(n, mu = mu3, Sigma = R3))
+
+# Combines the data into one data set
+df <- rbind(d1,d2,d3)
+
+# Plot the data
+ggplot(df, aes(x=X, y=Y)) +
+  geom_point() +
+  geom_point(x=0, y=1, colour = SIAP.color, shape = 15, size = 5) +
+  geom_point(x=0.5, y=0.8, colour = SIAP.color, shape = 15, size = 5) +
+  geom_point(x=-0.5, y=0.8, colour = SIAP.color, shape = 15, size = 5) +
+  labs(x = "", y="") +
+  theme_minimal()
+
+```
+
+
+
+```{r}
+ggplot(df, aes(x=X, y=Y)) +
+  geom_point() +
+  geom_point(x=-0.05, y=1.72, colour = SIAP.color, shape = 15, size = 5, alpha = 0.007) +
+  geom_point(x=1.75, y=0.3, colour = SIAP.color, shape = 15, size = 5, alpha = 0.007) +
+  geom_point(x=-1.48, y=0.2, colour = SIAP.color, shape = 15, size = 5, alpha = 0.007) +
+  labs(x = "", y="") +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(df, aes(x=X, y=Y)) +
+  geom_point() +
+  geom_point(x=mean(d1$X), y=mean(d1$Y), colour = SIAP.color, shape = 15, size = 5, alpha = 0.02) +
+  geom_point(x=mean(d2$X), y=mean(d2$Y), colour = SIAP.color, shape = 15, size = 5, alpha = 0.02) +
+  geom_point(x=mean(d3$X), y=mean(d3$Y), colour = SIAP.color, shape = 15, size = 5, alpha = 0.02) +  
+  labs(x = "", y="")+
+  theme_minimal()
+
+```
+
+
+Eventually the algorithm will converge when the centroids stop changing their position, this is when they are placed so the within sum of square variance can not be lowered further.
+
+
+## Pseudocode
+
+The way K-means clustering works is quite simple, but the algorithm can have some slight variation depending on the implementation, as there are several options you can do for instance when you initialize the centroids. In its most general case though the algorithm will look like this:
+
+1. Specify the $K$ number of clusters.
+
+2. Initialize these clusters randomly or according some strategy like selecting a $P$ subset of data points and initialize the $K$ clusters at the position of some of the data points such that the distance between the clusters is maximized.
+
+After this the following steps are iterated until convergence:
+
+3. Assign each data point to its closest cluster
+
+4. Compute the new centroid of each cluster so that the distance between the data points and the cluster is minimized. 
+
+The algorithm converges when the centroid no longer changes its position. 
+
+
+## Initialization matters!
+
+When we use K-means clustering we need to be mindful of where the centroids are initially placed, as poor initialization can result in a solution that is suboptimal. To see this we will run a kmeans run on the same data set as before, using only a single initial configuration:
+
+```{r}
+set.seed(777)
+kmeans <- kmeans(df, centers = 3, nstart = 1)
+fviz_cluster(kmeans, data = df, main = "", geom = "point") + theme_minimal() + labs(x = "", y = "")
+```
+
+As we can see the solution does not appear to make sense, cluster 3 seems to capture what should be two distinct clusters, while cluster 1 and 2 both share observations in a region of the space where it should only be one cluster. This will happen when we initialize the centroids poorly. A way to overcome this is to run a large amount of initial configurations, and then choosing the one that yields the best results. R can do this for us automatically if we specify the *nstart* hyperparameter in the *kmeans()* function:
+
+```{r}
+set.seed(777)
+kmean_clustering <- kmeans(df, centers = 3, nstart = 25)
+fviz_cluster(kmean_clustering, data = df, main = "", geom = "point") + theme_minimal() + labs(x = "", y = "")
+```
+
+By setting the *nstart* hyperparameter to 25 we get a solution that makes more sense, given the distribution of the data.
+
+## Determining optimal amount of clusters
+
+One popular metric to evaluate the number of clusters is using to calculate each observations Silhouette score. The silhouette score compares for the similarity of each observation in its own cluster compared to other clusters. It is numerically bound between -1 to 1, and a higher score is desirable as it means that the data point is similar to other data points within its own cluster and dissimilar to other clusters. The Silhouette score is also a way to assess clusters when the dimensions are high, which is important as we can then no longer visualize the clusters to see if they seem reasonable. 
+
+
+In the following plot each of the small vertical lines indicates the Silhouette score for a data point, and the dashed red line is the average silhouette score over all three clusters.
+
+
+```{r , results=TRUE}
+km_cluster <- eclust(df, "kmeans")
+silhouette_plot <- fviz_silhouette(km_cluster)
+silhouette_plot
+```
+
+From the graph we see that the average silhouette of all three cluster is 0.86 as indicated by the dashed red line. The silhouette score of each individual cluster seems to be high as well, indicating that the three clusters we use here is a suitable amount of clusters given the data. 
+
+
+
+*If* we were to find for instance a low performance on cluster 3 but the other two clusters performed well this may indicate that we have created an 'unnatural cluster'. This means that the third cluster is either unnecessary, that it captures a cluster of data points that is not a true cluster, or that we may need a fourth cluster, as the third cluster is trying to cluster two clusters in one, creating a different type of 'unnatural cluster'. 
+
+To explore this, we can rerun the same algorithm again but with 4 clusters, which should be one more than we need:
+
+```{r, results=TRUE}
+km_cluster2 <- eclust(df, "kmeans", k=4)
+silhouette_plot2 <- fviz_silhouette(km_cluster2)
+silhouette_plot2
+```
+
+
+From the visualization we can see that the first two clusters has a similar silhouette score as before, but the third and fourth cluster performs poorly. This is because we try to use two clusters where only one is needed. 
+
+## Limitations of K-means clustering
+
+- You need to specify the amount of clusters before you start, which can be tricky if when we don't know how many are suitable for the data.
+
+- Since we optimize the clusters using the euclidean distance we can only use numerical data, and the clusters are affected by outliers.
+
+- It assumes that the clusters are equally large in sample size and spherically distributed.
+
+- K-means is sensitive to the scale of the data, due to the usage of euclidean distance, as it will weight variables differently depending on the scale of the variables.
+ 
+As one last example, we can illustrate that K-means is sensitive to the distribution of the data by using a classic k-means clustering problem. For this example we generate two cluster of points, one being a rectangle, the other one being a square that is covered by the rectangle:
+
+```{r}
+# Samples the large rectangle
+sq1 <- sample <- data.frame(x = c(runif(1000, 0, 1),
+                                  runif(1000, 0, 1),
+                                  runif(1000, 0, 0.2),
+                                  runif(1000, 0.8, 1)),
+                            y = c(runif(1000, 0, 0.2),  
+                                  runif(1000, 0.8, 1),
+                                  runif(1000, 0.2, 0.8),
+                                  runif(1000, 0.2, 0.8)))
+# Samples the square inside the rectangle
+sq2 <- data.frame(x = runif(1000, 0.3, 0.7), y = runif(1000, 0.3, 0.7))
+rectangles <- rbind(sq1,sq2) 
+
+ggplot(rectangles, aes(x=x, y=y)) +
+  geom_point() +
+  labs(x = "", y="") +
+  theme_minimal()
+```
+
+We can then try to run K-means on this data using two clusters. To see that the algorithm consistently will fail on this data set we set *nstart* to 1000, meaning that we will run 1000 different initial configurations of the centroids, and choose the best result from these runs. 
+
+
+```{r}
+set.seed(777)
+km_rectangles <- kmeans(rectangles, centers = 2, nstart = 1000)
+fviz_cluster(km_rectangles, data = rectangles, main = "", geom = "point") + theme_minimal() + labs(x = "", y = "")
+```
+
+As we can see the algorithm finds two cluster that does not appear to be natural. 
+
+# Other clustering methods
+
+If you have reason to believe that the assumptions made in K-means clustering wont be met, or if you find that your clustering is performing poorly, there are other alternatives. Two other common types of clustering is hierarchical clustering and density based clustering.
+
+In hierarchical clustering the clusters are built like the structure of a decision tree which we saw in the dendograms in Module 4. There are two approaches to constructing the cluster: *Agglomerative* and *Divisive*. In *agglomerative* each data point starts out as a unique cluster, and these clusters are then sequentially merged based on similarity, until only one cluster remains. The *divisive* way of building it is the complete opposite, it starts off with one cluster and then the cluster gets split up recursively as you move down the hierarchy. A *divisive* approach without any stopping criteria is more accurate but is more computationally demanding than the *agglomerative* approach. Unlike K-means you can also use any type of combination of features, such as numerical and categorical data. Another advantage of using this approach over K-means is that you do not need to specify the amount of clusters before you run the algorithm.
+
+In density based clustering the clusters are created at areas where the data has higher density than the remainder of the data, which means that in areas where there are only a few datapoints, these will be considered as outliers or noise and will not be included in clusters. One of the most widely used density based clustering method is the DBSCAN algorithm. As with other density based methods it will cluster data points that are close together and in high density, and treat observations in low density regions as outliers. Thus unlike K-means, DBSCAN can handle outliers in the data. DBSCAN is also able to perform well on cluster shapes where K-means will fail, but it also has some limitations. As with K-means, DBSCAN can not use categorical data. It can also struggle to cluster data sets where different areas has a high difference in density. As with hierarchical clustering, DBSCAN also does not require you to specify the amount of clusters before you run the algorithm.
+
+
+# Wrap up
+
+- K-means is a simple and intuitive way of clustering data, that scales well for large data set and guarantees convergence.
+
+- We need to be mindful of the way we initialize our algorithm or we may end up with a suboptimal solution. 
+
+- Using silhouette score we can assess the strength of the clusters, and if we need adjust the amount of clusters, by either adding more or removing clusters. 
+
+- If you suspect the assumptions made when using K-means are held by your data, there are other types of clustering methods like hierarchical clustering and density clustering that can perform better. 
+
+- Each clustering method has its own strength and weaknesses, and knowing your data can help you decide on which clustering method to try out.
+
+# Corresponding functions if you use Python
+
+*Sklearn* has great functions for clustering in their *sklearn.cluster* module. 
+
+* *KMeans()*, 
+* AgglomerativeClustering(), and 
+* DBSCAN()  
+provide functions based on different types of clustering like centroid based, hierarchical, and density based clustering.
+
+- In the *sklearn.metrics* module,  the silhouette score of the clusters can be computed using *silhouette_score()*
+
