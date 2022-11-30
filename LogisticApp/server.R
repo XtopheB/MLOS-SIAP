@@ -39,14 +39,14 @@ server <- function(input, output) {
         # Prediction with the threshold
         I_Predictions <- as.factor(df$Predictions > input$Threshold) 
         levels(I_Predictions) <-c("TRUE", "FALSE")  # in case of only one value
-        levels(I_Predictions)[levels(I_Predictions)==  TRUE] <- "Positive"
-        levels(I_Predictions)[levels(I_Predictions)== FALSE] <- "Negative"
+        levels(I_Predictions)[levels(I_Predictions)==  TRUE] <- "Negative"
+        levels(I_Predictions)[levels(I_Predictions)== FALSE] <- "Positive"
         I_Predictions<- relevel(I_Predictions, ref = "Negative")
         
         #levels(I_Predictions)  <- classes  # Need to be specified in case the prediction provide only one class
         confusionMatrix(data = I_Predictions,
                                    reference = df$Y, 
-                                   positive = "Positive")   # <<- this is ho to compute specificity
+                                   positive = "Negative")   # <<- this is ho to compute specificity
                                                             # And sensitivity correctly
         
     }) 

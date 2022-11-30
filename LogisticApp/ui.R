@@ -15,7 +15,7 @@ library(e1071)
 # Define UI for application that draws a histogram
 ui <- fluidPage(
     titlePanel("Logit as a classifier"),
-    tags$h5("Christophe Bontemps & Patrick Jonsson (2021)"),
+    tags$h5("Christophe Bontemps & Patrick Jonsson (2022)"),
     # Sidebar layout with input and output definitions ----
     sidebarLayout(
         # Sidebar to demonstrate various slider options ----
