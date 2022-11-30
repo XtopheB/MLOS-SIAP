@@ -118,8 +118,9 @@ server <- function(input, output) {
     
     output$values <- renderTable({
         ConfMat <- CurrentConfMat()
-        sensitivity <- round(ConfMat$byClass["Sensitivity"], 4)
-        specificity <- round(1-ConfMat$byClass["Specificity"], 4)
+        ##  Changed here since O is the positive the computation is inverted as well! 
+        specificity <- round(1-ConfMat$byClass["Sensitivity"], 4)  
+        sensitivity <- round(ConfMat$byClass["Specificity"], 4)
         accuracy <- round(ConfMat$overall["Accuracy"], 4)
         kappa <- round(ConfMat$overall["Kappa"], 4)
         metric.data <- data.frame(
@@ -129,7 +130,7 @@ server <- function(input, output) {
                         "1 - Specificity"),
             Value = as.character(c(accuracy,
                                    kappa,
-                                   sensitivity,
+                                   sensitivity,  
                                    specificity)),
             stringsAsFactors = FALSE)
        
