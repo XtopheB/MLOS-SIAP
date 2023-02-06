@@ -57,7 +57,7 @@ Interactive tools built in Shiny are also embedded in specific directories and h
 - K-means clustering
 -	Introduction to Neural Networks
 
-## Module 6: “Real-World Machine Learning”:^[The code of theis section is not hosted on GitHub]
+## Module 6: “Real-World Machine Learning" (*The code of theis section is not hosted on GitHub*)
 ### Part 1: Estimating Poverty From Satellite Images (with Asian Development Bank)
 -	Training a Neural Network
 -	From images to data
