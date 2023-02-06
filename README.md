@@ -3,7 +3,7 @@
 This repository contains the code (.Rmd) and data used for the course *Machine Learning For Official Statistics and SDGs* delivered online by the SIAP in 2021 and 2022. This course was designed as a 6 weeks course, but was extented to a 8 weeks course in 2022. This repository follows the course's structure in different modules
 Interactive tools built in Shiny are also embedded in specific directories and helped learners have a better intuition of the methods. 
 
-> The code is created by Christophe Bontemps and Patrick Jonsson (2021) and are based on the work and inspiration from Pascal Lavergne (Toulouse School of Economics).
+> The code is created by Christophe Bontemps 5UN SIAP) and Patrick Jonsson (Intern SIAP, 2021) and are based on the work and inspiration from Pascal Lavergne (Toulouse School of Economics).
 
 ## Module 0: You've seen this before
 
