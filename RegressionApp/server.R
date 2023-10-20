@@ -38,32 +38,35 @@ server <- function(input, output) {
       geom_point() +
       theme_minimal() +
       
-      coord_cartesian(xlim = c(-3, 3), ylim = c(-3, 3)) +
-      geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), colour = SIAP.color, linewidth = 2) +
+      coord_cartesian(xlim = c(-3, 3), ylim = c(-3, 3)) 
+      if (input$show_line) {
+        p <- p+ geom_segment( aes(x = x1, y = y1, xend = x2, yend = y2), colour = SIAP.color, linewidth = 2)
+       }
       
       if (input$show_regression) {
-        r <- geom_smooth(method = "lm", se = TRUE, color = "red")
+        p <- p+ geom_smooth(method = "lm", se = TRUE, color = "darkred")
         
         # Fit the linear regression model for text display 
-        model <- lm(y ~ x, data = df)
+        model <- lm(y ~ x, data = data())
         # Get the coefficients
         coefs <- summary(model)$coefficients
         # Sign of beta1 for display
         sign_b1_reg <- ifelse(coefs[2,1]< 0, "", " +")
         # output the geom_smooth regression for the ggplot
-        r
+        p
       }
      
-     regression_text <- ifelse(input$show_regression, 
+     regression_sub <- ifelse(input$show_regression, 
                                paste("Computed regression line : Y = ",
                                      round(coefs[1,1], 1), sign_b1_reg,
                                      round(coefs[2,1],1), "X"), 
                                      "")
-    p +
-    labs(x = "X", y = "Y", 
-         title = paste("Line with selected values:  Y = ",input$coef_b0, sign_b1,
-                       input$coef_b1,"X"), 
-         subtitle = regression_text) +
+     regression_title <- ifelse(input$show_line, 
+                                paste("Line with selected values:  Y = ",input$coef_b0, sign_b1,
+                                                       input$coef_b1,"X"), "" )
+    p +labs(x = "X", y = "Y", 
+            title = regression_title, 
+            subtitle = regression_sub) +
         
       theme(plot.title = element_text(color = SIAP.color, size = 16),
             plot.subtitle = element_text(color = "darkred", size = 16))
